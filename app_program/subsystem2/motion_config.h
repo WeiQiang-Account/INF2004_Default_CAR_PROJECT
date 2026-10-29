@@ -23,14 +23,14 @@
 #define ENC_R_PIN_A             (2u)    /* Grove 2: plug pin 02 (red)        */
 #define ENC_R_PIN_B             (3u)    /*          plug pin 03 (green)      */
 
-/* TEMPORARY: right motor is faulty (waiting for a replacement). With 0 the
+/* Right motor replaced 2026-10-29: 1 = normal two-wheel operation. With 0 the
  * motion task drives and measures with the LEFT wheel only:
  *  - no stall / encoder-fault / self-test check on the right wheel
  *  - distance and turn progress come from the left encoder
  *  - the right motor gets 0 duty
- * Set back to 1 when the new motor is fitted.                              */
+ * (0 is only for running with one broken motor.)                          */
 #ifndef MOTION_RIGHT_MOTOR_OK
-#define MOTION_RIGHT_MOTOR_OK   (0)
+#define MOTION_RIGHT_MOTOR_OK   (1)
 #endif
 
 /* Direction fixes: set so that driving FORWARD gives positive counts and a
@@ -39,7 +39,7 @@
 #define ENC_L_SIGN              (1)
 #define ENC_R_SIGN              (-1)
 #define MOTOR_L_INVERT          (0)
-#define MOTOR_R_INVERT          (0)
+#define MOTOR_R_INVERT          (1)   /* 2026-10-29: new right motor turned backward on forward */
 
 /* Optional timing pin for logic-analyser tests (GP15 is spare; claim it in
  * TEAM.md). Set to -1 to disable. High during each 20 ms Motion cycle.     */
@@ -89,8 +89,8 @@
 /* ------------------------------------------------------------------------- */
 #define MAX_SPEED_MMPS          (500)
 #define DEFAULT_MOVE_SPEED_MMPS (250)
-#define TURN_SPEED_MMPS         (150)
-#define SLOW_SPEED_MMPS         (80)      /* final approach speed            */
+#define TURN_SPEED_MMPS         (120)
+#define SLOW_SPEED_MMPS         (60)      /* final approach speed            */
 #define MOVE_SLOW_FRACTION      (0.85f)   /* slow down after 85 % of a move  */
 #define TURN_SLOW_FRACTION      (0.80f)   /* slow down after 80 % of a turn  */
 #define STOPPED_SPEED_MMPS      (20.0f)
@@ -145,7 +145,7 @@
  * on se14/robot/telemetry and runs a drive pattern. Set to 0 once Buddy 1's
  * telemetry subsystem publishes the motion data instead.                 */
 #ifndef S2_TELEMETRY_TEST
-#define S2_TELEMETRY_TEST       (0)
+#define S2_TELEMETRY_TEST       (1)
 #endif
 
 /* Only with S2_TELEMETRY_TEST: 1 = also run the drive pattern

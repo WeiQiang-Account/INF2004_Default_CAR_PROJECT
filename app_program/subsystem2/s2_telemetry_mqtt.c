@@ -35,6 +35,9 @@
 #define S2_TELEM_TOPIC		"se14/robot/telemetry"
 #define S2_TELEM_PERIOD_MS	(200)
 
+/* Current move of the drive pattern (s2_telemetry_drive.c) */
+extern const char * volatile g_s2_drive_step;
+
 static mqtt_client_t	*s_client;
 static unsigned int	s_seq;
 static unsigned int	s_fail;
@@ -71,7 +74,7 @@ static void telem_tick(void *arg)
 {
 	motion_status_t	st;
 	int32_t		enc_l, enc_r;
-	UB		buf[200];
+	UB		buf[240];
 	INT		len;
 
 	(void)arg;
@@ -80,9 +83,9 @@ static void telem_tick(void *arg)
 		motion_get_status(&st);
 		encoder_read(&enc_l, &enc_r);
 		len = tm_sprintf(buf, (const UB*)
-			"{\"seq\":%u,\"state\":\"%s\",\"cause\":%d,\"v_l\":%d,\"v_r\":%d,"
+			"{\"seq\":%u,\"step\":\"%s\",\"state\":\"%s\",\"cause\":%d,\"v_l\":%d,\"v_r\":%d,"
 			"\"dist_mm\":%u,\"enc_l\":%d,\"enc_r\":%d,\"d_l\":%d,\"d_r\":%d}",
-			s_seq++, state_name((int)st.state), (int)st.cause,
+			s_seq++, g_s2_drive_step, state_name((int)st.state), (int)st.cause,
 			(int)st.speed_l_mmps, (int)st.speed_r_mmps,
 			(unsigned int)st.distance_mm, (int)enc_l, (int)enc_r,
 			(int)st.delta_l, (int)st.delta_r);
