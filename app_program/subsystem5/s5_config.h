@@ -10,10 +10,10 @@
 #define S5_PIN_SERVO        12   /* PWM slice 6 ch A, 50 Hz                    */
 #endif
 #ifndef S5_PIN_TRIG
-#define S5_PIN_TRIG         13   /* GPIO out (servo header)                    */
+#define S5_PIN_TRIG         0   /* GPIO out (servo header)                    */
 #endif
 #ifndef S5_PIN_ECHO
-#define S5_PIN_ECHO         14   /* GPIO in via 1k/2k divider (A9)             */
+#define S5_PIN_ECHO         1   /* GPIO in via 1k/2k divider (A9)             */
 #endif
 #define S5_PIN_BTN_START    20   /* Vehicle Controller owns buttons + buzzer   */
 #define S5_PIN_BTN_STOP     21
