@@ -10,6 +10,8 @@
 #include "../subsystem2/subsystem2.h"	/* IF-01/02: SAMPLE_MSG, pool, slots */
 #include "../subsystem4/subsystem4.h"	/* IF-03: mbf_summary, flg_events */
 
+#if S3_KEEP_TEMPLATE_EXAMPLE	/* template example, see s3_config.h: set 0 and delete this file when S2/S4 drop theirs */
+
 EXPORT void consumer_task(INT stacd, void *exinf)
 {
 	SAMPLE_MSG	*msg;
@@ -64,3 +66,5 @@ EXPORT void consumer_task(INT stacd, void *exinf)
 		tk_sig_sem(sem_slots, 1);
 	}
 }
+
+#endif /* S3_KEEP_TEMPLATE_EXAMPLE */
