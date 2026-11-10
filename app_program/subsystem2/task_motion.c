@@ -24,6 +24,10 @@
 
 #define MOTION_WEAK __attribute__((weak))
 
+/* Compass heading (deg, left turn = +) from subsystem 4. This weak default
+   says "no compass"; subsystem4.c has the real one.                        */
+MOTION_WEAK bool s2_hook_heading(float *deg) { (void)deg; return false; }
+
 /* Steering mailbox: written only by Line Follow, read only here.          */
 volatile uint16_t g_steer_latest = 0u;
 
@@ -54,6 +58,13 @@ typedef struct
 
     float    meas_l;            /* measured wheel speeds, mm/s              */
     float    meas_r;
+    float    base_now;          /* ramped line-following speed, mm/s        */
+    uint32_t preload_cycles;    /* gearbox take-up cycles left (move start) */
+    uint32_t bad_cycles;        /* cycles in a row with too many encoder skips */
+    bool     hdg_on;            /* this move holds a compass heading        */
+    float    hdg_ref;           /* heading at the start of the move, deg    */
+    float    hdg_err;           /* last heading error, deg (for the log)    */
+    bool     ramp_on;           /* base_now is being used                   */
     float    tgt_l;             /* target wheel speeds, mm/s                */
     float    tgt_r;
     int32_t  duty_l;            /* last duty applied, permille              */
@@ -83,6 +94,12 @@ static pid_ctrl_t      s_pid_r;
 static motion_links_t  s_links;
 static volatile uint32_t s_status_seq;     /* odd while s_status is being written */
 static volatile uint32_t s_cycles;         /* completed 20 ms cycles             */
+/* S2-M06: the task times its own wake-ups (1 us timer), so no other task has
+   to busy-wait to measure it. Written by the motion task only.           */
+static volatile uint32_t s_per_min = 0xFFFFFFFFu, s_per_max, s_per_sum, s_per_n;
+static volatile uint32_t s_busy_max, s_busy_sum;   /* time spent in one cycle's work, us */
+static uint32_t          s_per_last;
+static volatile bool     s_per_reset = true;
 
 /* ------------------------------------------------------------------------- */
 /* Weak hooks (other buddies override)                                      */
@@ -138,6 +155,7 @@ static void motion_reset_controllers(void)
 {
     pid_reset(&s_pid_l);
     pid_reset(&s_pid_r);
+    s_ctx.ramp_on = false;
     s_ctx.stall_ms_l = 0u;
     s_ctx.stall_ms_r = 0u;
 }
@@ -175,6 +193,7 @@ static void motion_enter_fault(motion_cause_t cause)
 
 static void motion_enter_stopping(uint32_t now_ms)
 {
+    s_ctx.ramp_on = false;
     s_ctx.state = MOTION_STATE_STOPPING;
     s_ctx.stop_start_ms = now_ms;
     s_ctx.stop_settle = 0u;
@@ -239,6 +258,12 @@ static void motion_handle_cmd(const motion_cmd_t *p_cmd, uint32_t now_ms)
             s_ctx.speed_mmps = (speed > 0) ? speed : DEFAULT_MOVE_SPEED_MMPS;
             s_ctx.target_counts = motion_mm_to_counts((float)motion_clamp(p_cmd->distance_mm, 0, 2047));
             if (!was_active) { motion_reset_controllers(); }
+            s_ctx.ramp_on = false;          /* new move: soft start again */
+            s_ctx.preload_cycles = (!was_active && (MOVE_PRELOAD_DUTY > 0)) ?
+                                   (MOVE_PRELOAD_MS / MOTION_PERIOD_MS) : 0u;
+            /* heading taken now, motors still off (their field moves the compass) */
+            s_ctx.hdg_on = (HEADING_HOLD != 0) && s2_hook_heading(&s_ctx.hdg_ref);
+            s_ctx.hdg_err = 0.0f;
             motion_mark_start();
             if (s_ctx.target_counts <= 0)
             {
@@ -253,7 +278,7 @@ static void motion_handle_cmd(const motion_cmd_t *p_cmd, uint32_t now_ms)
         case MOTION_CMD_TURN_LEFT:
         case MOTION_CMD_TURN_RIGHT:
         {
-            float arc_mm = (MOTION_PI * TRACK_WIDTH_MM *
+            float arc_mm = (MOTION_PI * TRACK_WIDTH_MM * TURN_SCALE *
                             (float)motion_clamp(p_cmd->angle_deg, 0, 360)) / 360.0f;
 
             os_flag_clear(s_links.flg_move_done, MOVE_DONE_BIT);
@@ -314,6 +339,11 @@ static void motion_drain_commands(uint32_t now_ms)
 /* ------------------------------------------------------------------------- */
 /* Per-state target speeds                                                  */
 /* ------------------------------------------------------------------------- */
+/* Test only (S2-M05 speed hold): ignore Line Follow's steering, so both
+   wheels get the same target while the robot is propped up off the line. */
+static volatile bool s_ignore_steer;
+void motion_ignore_steering(bool on) { s_ignore_steer = on; }
+
 static void motion_update_steering(uint32_t now_ms, int8_t *p_corr)
 {
     uint16_t w = g_steer_latest;          /* single 16-bit read: never torn */
@@ -330,7 +360,27 @@ static void motion_update_steering(uint32_t now_ms, int8_t *p_corr)
 
     s_ctx.steer_stale = (!s_ctx.steer_seen) ||
                         ((uint32_t)(now_ms - s_ctx.steer_change_ms) > STEER_STALE_MS);
-    *p_corr = s_ctx.steer_stale ? (int8_t)0 : corr;
+    *p_corr = (s_ctx.steer_stale || s_ignore_steer) ? (int8_t)0 : corr;
+}
+
+/* Move the ramped speed one step towards 'target' (mm/s). 'start' is used on
+   the first call after a stop / new move: what the wheels do now.          */
+static float motion_ramp(float target, float start)
+{
+#if (DRIVE_ACCEL_MMPS2 > 0)
+    float step = (float)DRIVE_ACCEL_MMPS2 * ((float)MOTION_PERIOD_MS / 1000.0f);
+    if (!s_ctx.ramp_on) {
+        s_ctx.base_now = start;
+        s_ctx.ramp_on = true;
+    }
+    if (s_ctx.base_now < (target - step))      { s_ctx.base_now += step; }
+    else if (s_ctx.base_now > (target + step)) { s_ctx.base_now -= step; }
+    else                                       { s_ctx.base_now = target; }
+    return s_ctx.base_now;
+#else
+    (void)start;
+    return target;
+#endif
 }
 
 static void motion_targets_driving(uint32_t now_ms)
@@ -339,8 +389,18 @@ static void motion_targets_driving(uint32_t now_ms)
     float  base = (float)(s_ctx.dir * s_ctx.speed_mmps);
     float  diff;
 
+    /* ramp towards the commanded speed (start from what the wheels do now) */
+    base = motion_ramp(base, (s_ctx.meas_l + s_ctx.meas_r) * 0.5f);
     motion_update_steering(now_ms, &corr);
     diff = (float)corr * STEER_GAIN_MMPS;     /* + = steer right: left faster */
+    {
+        /* Never make the inner wheel stop or reverse while following the line: a slow or
+           reversing wheel cannot be held by the PID (motor dead band) and trips the stall
+           check. 2026-11-06: at 100 mm/s, full steer asked the right wheel for -27 mm/s. */
+        float lim = STEER_MAX_FRACTION * ((base < 0.0f) ? -base : base);
+        if (diff >  lim) { diff =  lim; }
+        if (diff < -lim) { diff = -lim; }
+    }
     s_ctx.tgt_l = base + diff;
     s_ctx.tgt_r = base - diff;
 }
@@ -348,7 +408,7 @@ static void motion_targets_driving(uint32_t now_ms)
 static void motion_targets_move(uint32_t now_ms, int32_t l, int32_t r)
 {
     int32_t pl = (l - s_ctx.start_l) * s_ctx.dir;
-    int32_t pr = (r - s_ctx.start_r) * s_ctx.dir;
+    int32_t pr = (int32_t)((float)((r - s_ctx.start_r) * s_ctx.dir) * WHEEL_R_SCALE);   /* in left-wheel counts */
 #if (MOTION_RIGHT_MOTOR_OK != 0)
     int32_t progress = (pl + pr) / 2;
     float   mismatch = (float)(pl - pr);
@@ -369,15 +429,41 @@ static void motion_targets_move(uint32_t now_ms, int32_t l, int32_t r)
     {
         v = (float)SLOW_SPEED_MMPS;
     }
+#if (MOVE_START_MMPS > 0)
+    {
+        /* soft start: begin at MOVE_START_MMPS (above the dead band), then ramp */
+        float now_v = (float)s_ctx.dir * (s_ctx.meas_l + s_ctx.meas_r) * 0.5f;
+        if (now_v < (float)MOVE_START_MMPS) { now_v = (float)MOVE_START_MMPS; }
+        if (v > (float)MOVE_START_MMPS) { v = motion_ramp(v, now_v); }
+    }
+#endif
     /* Straight-line correction: slow the wheel that is ahead */
-    s_ctx.tgt_l = (float)s_ctx.dir * (v - (STRAIGHT_KP * mismatch));
-    s_ctx.tgt_r = (float)s_ctx.dir * (v + (STRAIGHT_KP * mismatch));
+    {
+        float kp = STRAIGHT_KP;
+        float steer = 0.0f;                        /* + = turn right (left wheel faster) */
+        float h;
+        if (s_ctx.hdg_on && s2_hook_heading(&h))
+        {
+            float e = h - s_ctx.hdg_ref;           /* + = robot has turned LEFT */
+            if (e > 180.0f)  { e -= 360.0f; }
+            if (e < -180.0f) { e += 360.0f; }
+            s_ctx.hdg_err = e;
+            steer = HEADING_KP * e;
+            if (steer >  HEADING_MAX_MMPS) { steer =  HEADING_MAX_MMPS; }
+            if (steer < -HEADING_MAX_MMPS) { steer = -HEADING_MAX_MMPS; }
+            /* rotation = (v_r - v_l) / track, the same whichever way it drives,
+               so a left twist is undone by a faster LEFT wheel even when reversing */
+            kp = HEADING_COUNTS_KP;                /* the compass leads, counts only damp */
+        }
+        s_ctx.tgt_l = (float)s_ctx.dir * (v - (kp * mismatch)) + steer;
+        s_ctx.tgt_r = (float)s_ctx.dir * (v + (kp * mismatch)) - steer;
+    }
 }
 
 static void motion_targets_turn(uint32_t now_ms, int32_t l, int32_t r)
 {
     int32_t pl = (l - s_ctx.start_l) * s_ctx.dir;      /* left forward on right turn */
-    int32_t pr = -(r - s_ctx.start_r) * s_ctx.dir;     /* right backward on right turn */
+    int32_t pr = (int32_t)((float)(-(r - s_ctx.start_r) * s_ctx.dir) * WHEEL_R_SCALE);   /* right backward on right turn; left-wheel counts */
 #if (MOTION_RIGHT_MOTOR_OK != 0)
     int32_t progress = (pl + pr) / 2;
     float   mismatch = (float)(pl - pr);
@@ -508,9 +594,9 @@ void motion_step(uint32_t now_ms, bool estop)
     s_ctx.last_l = l;
     s_ctx.last_r = r;
     s_ctx.meas_l = ((float)s_ctx.dl * MM_PER_COUNT) / dt_s;
-    s_ctx.meas_r = ((float)s_ctx.dr * MM_PER_COUNT) / dt_s;
+    s_ctx.meas_r = ((float)s_ctx.dr * MM_PER_COUNT * WHEEL_R_SCALE) / dt_s;
 #if (MOTION_RIGHT_MOTOR_OK != 0)
-    s_ctx.distance_mm += ((float)(motion_abs(s_ctx.dl) + motion_abs(s_ctx.dr)) * 0.5f) * MM_PER_COUNT;
+    s_ctx.distance_mm += (((float)motion_abs(s_ctx.dl) + ((float)motion_abs(s_ctx.dr) * WHEEL_R_SCALE)) * 0.5f) * MM_PER_COUNT;
 #else
     s_ctx.distance_mm += (float)motion_abs(s_ctx.dl) * MM_PER_COUNT;
 #endif
@@ -526,7 +612,8 @@ void motion_step(uint32_t now_ms, bool estop)
     {
         motion_enter_fault(MOTION_CAUSE_ESTOP);
     }
-    else if ((bad > ENC_MAX_BAD_PER_CYCLE) && (s_ctx.state != MOTION_STATE_FAULT))
+    else if ((bad > ENC_MAX_BAD_PER_CYCLE) && (s_ctx.state != MOTION_STATE_FAULT) &&
+             (++s_ctx.bad_cycles >= ENC_BAD_CYCLES))
     {
         motion_enter_fault(MOTION_CAUSE_ENCODER);
     }
@@ -534,6 +621,7 @@ void motion_step(uint32_t now_ms, bool estop)
     {
         /* no override */
     }
+    if (bad <= ENC_MAX_BAD_PER_CYCLE) { s_ctx.bad_cycles = 0u; }   /* the run of noisy cycles ended */
 
     /* 3. Commands (latest wins) */
     motion_drain_commands(now_ms);
@@ -568,7 +656,14 @@ void motion_step(uint32_t now_ms, bool estop)
     }
 
     /* 5. Output */
-    if (motion_is_active(s_ctx.state))
+    if ((s_ctx.state == MOTION_STATE_DIST_MOVE) && (s_ctx.preload_cycles > 0u))
+    {
+        /* gearbox take-up: same small duty on both wheels, no PID yet */
+        s_ctx.duty_l = s_ctx.dir * MOVE_PRELOAD_DUTY;
+        s_ctx.duty_r = s_ctx.dir * MOVE_PRELOAD_DUTY;
+        s_ctx.preload_cycles--;
+    }
+    else if (motion_is_active(s_ctx.state))
     {
         s_ctx.duty_l = (int32_t)pid_update(&s_pid_l, s_ctx.tgt_l - s_ctx.meas_l, dt_s, SPEED_FF * s_ctx.tgt_l);
 #if (MOTION_RIGHT_MOTOR_OK != 0)
@@ -654,8 +749,31 @@ void motion_task(int32_t stacd, void *p_exinf)
             }
         }
 
+        {
+            uint32_t us = os_now_us();
+            if (s_per_reset)
+            {
+                s_per_min = 0xFFFFFFFFu; s_per_max = 0u; s_per_sum = 0u; s_per_n = 0u;
+                s_busy_max = 0u; s_busy_sum = 0u;
+                s_per_reset = false;
+            }
+            else if (!estop)                 /* an E-stop wake is early on purpose */
+            {
+                uint32_t p = us - s_per_last;
+                if (p < s_per_min) { s_per_min = p; }
+                if (p > s_per_max) { s_per_max = p; }
+                s_per_sum += p;
+                s_per_n++;
+            }
+            s_per_last = us;
+        }
         motion_step(os_now_ms(), estop);
         motion_watchdog_checkin();
+        {
+            uint32_t busy = os_now_us() - s_per_last;    /* work done this cycle */
+            if (busy > s_busy_max) { s_busy_max = busy; }
+            s_busy_sum += busy;
+        }
     }
 }
 
@@ -715,6 +833,9 @@ bool motion_stop(void)
     return motion_send_simple(MOTION_CMD_STOP, 0, 0, 0, false);
 }
 
+float motion_heading_error(void) { return s_ctx.hdg_on ? s_ctx.hdg_err : 0.0f; }
+bool  motion_heading_used(void)  { return s_ctx.hdg_on; }
+
 bool motion_reset(void)
 {
     return motion_send_simple(MOTION_CMD_RESET, 0, 0, 0, false);
@@ -730,6 +851,24 @@ void motion_get_status(motion_status_t *p_out)
         *p_out = s_status;
         __sync_synchronize();
     } while (((seq & 1u) != 0u) || (seq != s_status_seq));
+}
+
+/* S2-M06: loop period statistics since the last reset (us) */
+void motion_period_reset(void) { s_per_reset = true; }
+void motion_busy_stats(uint32_t *p_max, uint32_t *p_avg)
+{
+    uint32_t n = s_per_n;
+    *p_max = s_busy_max;
+    *p_avg = (n > 0u) ? (s_busy_sum / n) : 0u;
+}
+
+void motion_period_stats(uint32_t *p_min, uint32_t *p_max, uint32_t *p_avg, uint32_t *p_n)
+{
+    uint32_t n = s_per_n;
+    *p_min = s_per_min;
+    *p_max = s_per_max;
+    *p_avg = (n > 0u) ? (s_per_sum / n) : 0u;
+    *p_n   = n;
 }
 
 uint32_t motion_cycle_count(void)

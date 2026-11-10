@@ -38,6 +38,17 @@ enum {
 int      vc_post(uint32_t w0);
 int      vc_post2(uint32_t w0, uint32_t w1);
 uint32_t vc_dropped_events(void);
+uint8_t  vc_fault_cause(void);   /* 0 none, 1 init, 2 impact, 3 line lost, 4 timeout, 5 sensor, 6 recovery, 7 motion */
+/* Ultrasonic diagnostics: first rising / falling ECHO edge of the last ping, in us after
+   the trigger (0xFFFFFFFF = none), total edges since boot, ECHO pin level now. */
+void     s5_echo_diag(uint32_t *rise_us, uint32_t *fall_us, uint32_t *edges, uint32_t *level);
+/* Result of the last us_ping(): pulse width it used (us), status 0 ok / 1 no echo / 2 no sensor, mm. */
+void     s5_ping_diag(uint32_t *width_us, uint32_t *status, uint32_t *mm);
+/* Manual servo (dashboard test): deg 0..180 holds that angle, -1 = automatic
+   (back to straight ahead). The VC puts it back to automatic on START.       */
+void     s5_servo_manual(int deg);
+int      s5_servo_angle(void);      /* angle last commanded, before the trim  */
+int      s5_servo_is_manual(void);
 
 /* Status bytes for telemetry (single-byte reads/writes are atomic on RP2040). */
 uint8_t  vc_status_byte(void);   /* state[2:0] | nav[4:3] | on_hump[5] | degraded[6] */

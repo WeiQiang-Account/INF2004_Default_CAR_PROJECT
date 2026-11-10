@@ -22,6 +22,8 @@ void s5_fault_set(int on);		/* flg_fault: FAULT_BIT_NO_ECHO             */
 
 /* ---- weak hooks (override in your own subsystem) ----------------------------- */
 int  s5_hook_line_detected(void);	/* Buddy 3: any IR sensor over the line (default 0) */
+int  s5_hook_line_lost(void);		/* Buddy 3: 1 line lost, 0 on the line, -1 unknown (default) */
+int  s5_hook_line_ready(void);		/* Buddy 3: IR calibration finished (default 1)    */
 int  s5_hook_imu_ready(void);		/* Buddy 4: IMU calibrated (default 1)              */
 int  s5_hook_remote_poll(void);		/* Buddy 1: 0 none, 1 start, 2 stop (default 0)     */
 #endif

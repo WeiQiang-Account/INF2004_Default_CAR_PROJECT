@@ -67,3 +67,5 @@ void motor_init(void) { g_mock_duty[0] = 0; g_mock_duty[1] = 0; }
 void motor_set(motor_side_t s, int32_t d) { g_mock_duty[s] = d; }
 void motor_stop_all(void) { g_mock_duty[0] = 0; g_mock_duty[1] = 0; g_mock_stop_all_calls++; }
 void motion_debug_pin(bool high) { (void)high; }
+
+uint32_t os_now_us(void) { return g_mock_now_ms * 1000u; }

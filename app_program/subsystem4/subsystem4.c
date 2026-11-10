@@ -1,254 +1,230 @@
-#include <stdio.h>      
-#include <stdlib.h>     
-#include <math.h>       
-#include "pico/stdlib.h"
-#include "hardware/i2c.h"
-#include "subsystem4.h"        
+/*
+ *	subsystem4.c
+ *	Subsystem 4 -- Buddy 4: creates its objects and starts its tasks.
+ *	Also: the shared sample (Safety -> Terrain), telemetry getters, the VC
+ *	"IMU ready" hook and the hardware watchdog (NFR20).
+ *
+ *	Tasks : imu_safety_task   S4_PRI_SAFETY  (10) every 20 ms, core 1 (next to Motion)
+ *	        imu_terrain_task  S4_PRI_TERRAIN (19) woken by flg_imu_new
+ *	APIs used: tk_cre_flg, app_start_task, in_w / out_w (watchdog registers)
+ */
+#include "subsystem4.h"
 
-// --- Threshold Parameters ---
-#define IMPACT_ACCEL_THRESHOLD 2.5f   
-#define TILT_ANGLE_THRESHOLD   30.0f  
-#define CLIMB_PITCH_THRESHOLD  5.0f   
-#define DESCENT_PITCH_THRESHOLD -5.0f 
-#define TURN_RATE_THRESHOLD    30.0f  
+EXPORT ID	flg_imu_new;
 
-// --- Shared Internal Data Storage ---
-static imu_sensor_data_t g_imu_latest;       
-static bool g_imu_new_sample_flag = false;    
-static float g_accel_z_bias = 0.0f;           
-static float g_pitch_deg = 0.0f;              
-static float g_hump_accum_mm = 0.0f;          
-static uint8_t g_hump_peak_mm = 0;            
-static uint32_t g_last_enc_count = 0;         
+/* ------------------------------------------------------------------ shared sample */
+LOCAL volatile UW	sh_seq;			/* odd while being written */
+LOCAL s4_sample_t	sh_sample;
+LOCAL volatile BOOL	sh_valid;
+LOCAL volatile UW	sh_count;
 
-// --- Subsystem Packed States ---
-static imu_states_packed_t g_subsystem_states = {0, 0, 0, 0}; 
-
-// --- Atomic Event Flags ---
-volatile uint32_t g_event_flags_mask = 0;     
-volatile bool g_flg_estop = false;            
-
-// --- Low-Level LSM303 I2C Helper Functions ---
-static void lsm303_write_reg(uint8_t reg, uint8_t data) {
-    uint8_t buffer[2] = {reg, data}; 
-    i2c_write_blocking(MPU6050_I2C_PORT, LSM303_ACCEL_ADDR, buffer, 2, false); 
+void s4_shared_write(const s4_sample_t *s)
+{
+	sh_seq++;
+	__sync_synchronize();
+	sh_sample = *s;
+	sh_valid = TRUE;
+	sh_count++;
+	__sync_synchronize();
+	sh_seq++;
 }
 
-static bool lsm303_read_raw_accel(int16_t *accel) {
-    uint8_t reg = LSM303_OUT_X_L_A | 0x80; // Set MSB for auto-increment read
-    uint8_t buffer[6]; 
-
-    int ret = i2c_write_blocking(MPU6050_I2C_PORT, LSM303_ACCEL_ADDR, &reg, 1, true);
-    if (ret == PICO_ERROR_GENERIC) return false; 
-
-    ret = i2c_read_blocking(MPU6050_I2C_PORT, LSM303_ACCEL_ADDR, buffer, 6, false);
-    if (ret == PICO_ERROR_GENERIC) return false; 
-
-    // Corrected casting and bit shifting for all three axes
-    accel[0] = (int16_t)(((buffer[1] << 8) | buffer[0])) >> 4; 
-    accel[1] = (int16_t)(((buffer[3] << 8) | buffer[2])) >> 4; 
-    accel[2] = (int16_t)(((buffer[5] << 8) | buffer[4])) >> 4; 
-
-    return true; 
+void s4_shared_read(s4_shared_t *out)
+{
+	UW a, b;
+	do {				/* the writer is on the other core: retry on a torn copy */
+		a = sh_seq;
+		__sync_synchronize();
+		out->s = sh_sample;
+		out->valid = sh_valid;
+		__sync_synchronize();
+		b = sh_seq;
+	} while ((a != b) || ((a & 1u) != 0u));
+	out->seq = a;
 }
 
-// --- Atomic Helper Functions ---
-static void atomic_set_fault_bit(uint32_t bit_mask) {
-    g_event_flags_mask |= bit_mask; 
+/* ------------------------------------------------------------------ telemetry values */
+LOCAL volatile UB	g_state = S4_IMU_CALIBRATING;
+LOCAL volatile BOOL	g_ready;
+LOCAL volatile H	g_pitch_x10;
+LOCAL volatile H	g_yaw;
+LOCAL volatile UB	g_mclass, g_terrain;
+LOCAL volatile UH	g_hump_now, g_hump_last, g_hump_max, g_humps, g_peak_cg;
+LOCAL volatile BOOL	g_wdt_reset;
+LOCAL volatile float	g_hdg;			/* compass heading, deg, left = + */
+LOCAL volatile BOOL	g_hdg_ok;
+LOCAL volatile UB	g_es_why;		/* last E-stop: S4_SAFE_IMPACT / S4_SAFE_TILT bits */
+LOCAL volatile UH	g_es_cg, g_es_tilt;	/* |a| (0.01 g) and tilt (deg) on that sample */
+
+void s4_set_imu_state(UINT st)
+{
+	g_state = (UB)st;
+	if ((st == S4_IMU_MONITORING) || (st == S4_IMU_LOST)) {
+		g_ready = TRUE;		/* VC may leave INIT: degraded is allowed, not a blocker */
+	}
 }
 
-static void atomic_clear_fault_bit(uint32_t bit_mask) {
-    g_event_flags_mask &= ~bit_mask; 
+void s4_terrain_publish(INT pitch_x10, UINT mclass, INT yaw, const s4_hump_t *h)
+{
+	g_pitch_x10 = (H)pitch_x10;
+	g_mclass = (UB)mclass;
+	g_yaw = (H)yaw;
+	g_terrain = (UB)h->state;
+	g_hump_now = (h->state == S4_FLAT) ? 0u : (UH)((h->h_mm > 0.0f) ? (h->h_mm + 0.5f) : 0.0f);
+	g_hump_last = h->last_peak_mm;
+	g_hump_max = h->max_peak_mm;
+	g_humps = h->humps;
 }
 
-// --- Hardware Initialization ---
-void imu_hardware_init(void) {
-    gpio_set_function(MPU6050_SDA_PIN, GPIO_FUNC_I2C); 
-    gpio_set_function(MPU6050_SCL_PIN, GPIO_FUNC_I2C); 
-    gpio_pull_up(MPU6050_SDA_PIN); 
-    gpio_pull_up(MPU6050_SCL_PIN); 
-
-    i2c_init(MPU6050_I2C_PORT, 400 * 1000); 
-
-    // Initialize LSM303 Accelerometer: Normal power mode, 100Hz, enable X, Y, Z axes (CTRL_REG1_A = 0x57)
-    lsm303_write_reg(LSM303_CTRL_REG1_A, 0x57);
-    // Continuous update, +/- 2g scale (CTRL_REG4_A = 0x00)
-    lsm303_write_reg(LSM303_CTRL_REG4_A, 0x00);
-    sleep_ms(50); 
-
-    float accel_z_sum = 0.0f; 
-    int valid_samples = 0; 
-
-    for (int i = 0; i < 50; i++) { 
-        int16_t a_raw[3]; 
-        if (lsm303_read_raw_accel(a_raw)) { 
-            accel_z_sum += (float)a_raw[2] / 1000.0f; // Scale factor for +/-2g 12-bit
-            valid_samples++; 
-        }
-        sleep_ms(20); 
-    }
-
-    if (valid_samples > 0) { 
-        g_accel_z_bias = (accel_z_sum / valid_samples) - 1.0f; 
-    }
-
-    g_subsystem_states.safety_state = 1; 
+void s4_note_accel(float mag)
+{
+	UH cg = (UH)((mag * 100.0f) + 0.5f);
+	if (cg > g_peak_cg) {
+		g_peak_cg = cg;
+	}
 }
 
-// --- Task 1: IMU Safety Monitor (Priority 5, Highest) ---
-void task_imu_safety_monitor_run_20ms(void) {
-    static uint8_t failed_read_count = 0; 
-    int16_t a_raw[3]; 
+void s4_note_estop(UINT why, float mag, float tilt)
+{
+	g_es_cg   = (UH)((mag * 100.0f) + 0.5f);
+	g_es_tilt = (UH)((tilt > 0.0f) ? (tilt + 0.5f) : 0.0f);
+	g_es_why  = (UB)why;
+}
+UINT s4_estop_why(void)          { return g_es_why; }
+UINT s4_estop_cg(void)           { return g_es_cg; }
+UINT s4_estop_tilt(void)         { return g_es_tilt; }
 
-    if (!lsm303_read_raw_accel(a_raw)) { 
-        failed_read_count++; 
-        if (failed_read_count >= 3) { 
-            atomic_set_fault_bit(FAULT_BIT_IMU_LOST); 
-            printf("[IMU Safety] FAULT: LSM303 Communication Lost!\n"); 
-        }
-        return; 
-    }
+void s4_heading_publish(float deg, BOOL ok)
+{
+	g_hdg = deg;
+	g_hdg_ok = ok;
+}
+/* dashboard: whole degrees -180..180, or 999 when there is no compass */
+INT  s4_heading_deg(void)        { return g_hdg_ok ? (INT)((g_hdg >= 0.0f) ? (g_hdg + 0.5f) : (g_hdg - 0.5f)) : 999; }
 
-    failed_read_count = 0; 
-    atomic_clear_fault_bit(FAULT_BIT_IMU_LOST); 
-
-    // Convert raw counts to g units (+/-2g scale factor ~1000 LSB/g for 12-bit right-aligned)
-    g_imu_latest.accel_x_g = (float)a_raw[0] / 1000.0f; 
-    g_imu_latest.accel_y_g = (float)a_raw[1] / 1000.0f; 
-    g_imu_latest.accel_z_g = ((float)a_raw[2] / 1000.0f) - g_accel_z_bias; 
-
-    float accel_magnitude = sqrtf( 
-        g_imu_latest.accel_x_g * g_imu_latest.accel_x_g +
-        g_imu_latest.accel_y_g * g_imu_latest.accel_y_g +
-        g_imu_latest.accel_z_g * g_imu_latest.accel_z_g
-    );
-
-    float pitch_accel_deg = atan2f(g_imu_latest.accel_y_g, g_imu_latest.accel_z_g) * (180.0f / 3.14159f); 
-
-    if (accel_magnitude > IMPACT_ACCEL_THRESHOLD || fabsf(pitch_accel_deg) > TILT_ANGLE_THRESHOLD) { 
-        g_flg_estop = true; 
-        atomic_set_fault_bit(FAULT_BIT_IMPACT_TILT); 
-        g_subsystem_states.safety_state = 2; 
-        printf("[IMU Safety] EMERGENCY STOP! Impact: %.2fg, Pitch: %.1f deg\n", accel_magnitude, pitch_accel_deg); 
-    }
-
-    g_imu_new_sample_flag = true; 
+/* Motion (S2) asks this at the start of a straight move and every 20 ms.
+   Strong definition: overrides the weak default in subsystem2/task_motion.c. */
+bool s2_hook_heading(float *deg)
+{
+	if (!g_hdg_ok) { return false; }
+	*deg = g_hdg;
+	return true;
 }
 
-// --- Task 2: IMU Terrain & Hump Monitor (Priority 22, Medium) ---
-void task_imu_terrain_run_20ms(uint32_t current_enc_count) {
-    if (!g_imu_new_sample_flag) return; 
-    g_imu_new_sample_flag = false; 
+UINT s4_imu_state(void)          { return g_state; }
+BOOL s4_imu_ready(void)          { return g_ready; }
+INT  s4_pitch_x10(void)          { return g_pitch_x10; }
+INT  s4_turn_rate_dps(void)      { return g_yaw; }
+UINT s4_motion_class(void)       { return g_mclass; }
+UINT s4_terrain_state(void)      { return g_terrain; }
+UINT s4_hump_mm(void)            { return g_hump_now; }
+UINT s4_hump_last_mm(void)       { return g_hump_last; }
+UINT s4_hump_max_mm(void)        { return g_hump_max; }
+UINT s4_hump_count(void)         { return g_humps; }
+UINT s4_peak_accel_cg(void)      { return g_peak_cg; }
+BOOL s4_watchdog_reset_seen(void){ return g_wdt_reset; }
+UW   s4_sample_count(void)       { return sh_count; }
 
-    const float dt = 0.020f; 
-
-    // Calculate pitch purely from accelerometer with a simple low-pass filter (since LSM303 lacks a gyro)
-    float pitch_accel_deg = atan2f(g_imu_latest.accel_y_g, g_imu_latest.accel_z_g) * (180.0f / 3.14159f);
-    g_pitch_deg = (0.85f * g_pitch_deg) + (0.15f * pitch_accel_deg); // Low-pass filter to smooth vibration noise
-
-    // Classify motion using encoder delta (differential turn detection suggested by teammate)
-    uint32_t enc_delta = current_enc_count - g_last_enc_count;
-    
-    if (current_enc_count != g_last_enc_count) { 
-        g_subsystem_states.motion_class = 1; // 1 = MOVING
-    } else {
-        g_subsystem_states.motion_class = 0; // 0 = STATIONARY
-    }
-
-    g_last_enc_count = current_enc_count; 
-    float delta_s_meters = ((float)enc_delta / 937.0f) * (3.14159f * 0.065f); 
-
-    switch (g_subsystem_states.terrain_state) { 
-        case 0: // FLAT phase
-            if (g_pitch_deg > CLIMB_PITCH_THRESHOLD) { 
-                g_subsystem_states.terrain_state = 1; 
-                g_hump_accum_mm = 0.0f; 
-
-                imu_packed_event_t event = { 
-                    .event_id = EVENT_HUMP_START, 
-                    .motion_state = g_subsystem_states.motion_class, 
-                    .peak_height_mm = 0, 
-                    .reserved = 0 
-                };
-                printf("[IMU Terrain] EVENT: HUMP_START posted to Queue (Packed ID: %d)\n", event.event_id); 
-            }
-            break;
-
-        case 1: // CLIMBING phase
-            g_hump_accum_mm += sinf(g_pitch_deg * (3.14159f / 180.0f)) * delta_s_meters * 1000.0f; 
-
-            if (g_pitch_deg < CLIMB_PITCH_THRESHOLD && g_pitch_deg > DESCENT_PITCH_THRESHOLD) { 
-                g_subsystem_states.terrain_state = 2; 
-            }
-            break;
-
-        case 2: // ON_TOP phase
-            g_hump_accum_mm += sinf(g_pitch_deg * (3.14159f / 180.0f)) * delta_s_meters * 1000.0f; 
-
-            if (g_pitch_deg < DESCENT_PITCH_THRESHOLD) { 
-                g_subsystem_states.terrain_state = 3; 
-            }
-            break;
-
-        case 3: // DESCENDING phase
-            g_hump_accum_mm += sinf(g_pitch_deg * (3.14159f / 180.0f)) * delta_s_meters * 1000.0f; 
-
-            if (fabsf(g_pitch_deg) < 3.0f) { 
-                g_subsystem_states.terrain_state = 0; 
-
-                if (g_hump_accum_mm < 0.0f) g_hump_accum_mm = 0.0f; 
-                if (g_hump_accum_mm > 100.0f) g_hump_accum_mm = 100.0f; 
-                g_hump_peak_mm = (uint8_t)roundf(g_hump_accum_mm); 
-
-                imu_packed_event_t event = { 
-                    .event_id = EVENT_HUMP_DONE, 
-                    .motion_state = g_subsystem_states.motion_class, 
-                    .peak_height_mm = g_hump_peak_mm, 
-                    .reserved = 0 
-                };
-                printf("[IMU Terrain] EVENT: HUMP_DONE posted! Peak Height: %d mm (LSM303 Payload)\n", 
-                       event.peak_height_mm); 
-            }
-            break;
-
-        default:
-            g_subsystem_states.terrain_state = 0; 
-            break;
-    }
+/* Buddy 5's Vehicle Controller asks this in INIT. Strong definition: overrides the
+   weak default in subsystem5/s5_port.c. Ready also when the IMU is LOST: the robot
+   runs degraded (50 % speed, no humps) instead of refusing to start (Week 6 6.4). */
+int s5_hook_imu_ready(void)
+{
+	return (g_ready != FALSE) ? 1 : 0;
 }
 
-// --- Standalone Test Main Function ---
-int main(void) {
-    stdio_init_all(); 
-    sleep_ms(2000); 
+/* ------------------------------------------------------------------ watchdog (NFR20) */
+#define S4_WDT_BASE		0x40058000u
+#define S4_WDT_CTRL		(S4_WDT_BASE + 0x00u)
+#define S4_WDT_LOAD		(S4_WDT_BASE + 0x04u)
+#define S4_WDT_REASON		(S4_WDT_BASE + 0x08u)
+#define S4_WDT_CTRL_ENABLE	(1u << 30)
+#define S4_WDT_CTRL_PAUSE	((1u << 24) | (1u << 25) | (1u << 26))	/* stop while a debugger halts */
+#define S4_WDT_REASON_TIMER	(1u << 0)
+#define S4_WDT_TICK		(S4_WDT_BASE + 0x2Cu)
+#define S4_WDT_TICK_ENABLE	(1u << 9)
+#define S4_WDT_TICK_CYCLES	12u		/* clk_ref = 12 MHz crystal (cpu_clock.c) -> 1 us */
+#define S4_PSM_WDSEL		(0x40010000u + 0x08u)
+#define S4_PSM_WDSEL_ALL	0x0001FFFCu	/* reset everything except the oscillators */
+/* RP2040-E1: the counter decrements twice per 1 us tick, so load 2x the time. */
+#define S4_WDT_TICKS		((UW)S4_WATCHDOG_MS * 1000u * 2u)
 
-    printf("==================================================\n"); 
-    printf("   Buddy 4 (LSM303 Subsystem) Standalone Test     \n"); 
-    printf("==================================================\n"); 
+LOCAL BOOL wdt_running;
 
-    imu_hardware_init(); 
-    printf("[Test] LSM303 Initialized on GP4/GP5 at Address 0x19.\n\n"); 
+void s4_watchdog_start(void)
+{
+#if S4_WATCHDOG_ENABLE
+	out_w(S4_PSM_WDSEL, S4_PSM_WDSEL_ALL);
+	out_w(S4_WDT_LOAD, S4_WDT_TICKS);
+	set_w(S4_WDT_CTRL, S4_WDT_CTRL_PAUSE | S4_WDT_CTRL_ENABLE);
+	s4_tick_check();
+	wdt_running = TRUE;
+	S4_PRINT("[S4] hardware watchdog on: %d ms (NFR20)\n", (INT)S4_WATCHDOG_MS);
+#endif
+}
 
-    uint32_t simulated_encoder_count = 0; 
+/* Keep the 1 us tick right: if anything changed it, put it back (and say so once). */
+void s4_tick_check(void)
+{
+	static BOOL told = FALSE;
+	UW t = in_w(S4_WDT_TICK) & 0x3FFu;		/* ENABLE + CYCLES */
+	if (t != (S4_WDT_TICK_ENABLE | S4_WDT_TICK_CYCLES)) {
+		out_w(S4_WDT_TICK, S4_WDT_TICK_ENABLE | S4_WDT_TICK_CYCLES);
+		if (!told) {
+			told = TRUE;
+			S4_PRINT("[S4] us tick was changed to 0x%x - restored to 1 us\n", (UINT)t);
+		}
+	}
+}
 
-    for (int cycle = 1; cycle <= 100; cycle++) { 
-        task_imu_safety_monitor_run_20ms(); 
+void s4_watchdog_feed(void)
+{
+	if (wdt_running) {
+		out_w(S4_WDT_LOAD, S4_WDT_TICKS);
+	}
+}
 
-        if (cycle > 20 && cycle < 80) { 
-            simulated_encoder_count += 20; 
-        }
+/* ------------------------------------------------------------------ init / start */
+EXPORT ER subsystem4_init(void)
+{
+	T_CFLG	cflg = {0};
 
-        task_imu_terrain_run_20ms(simulated_encoder_count); 
+	cflg.flgatr  = TA_TFIFO | TA_WMUL;
+	cflg.iflgptn = 0;
+	flg_imu_new = tk_cre_flg(&cflg);
+	if (flg_imu_new < E_OK) {
+		return flg_imu_new;
+	}
 
-        if (g_flg_estop) { 
-            printf("[Test] CRITICAL: Motor E-Stop Flag Active! Fault Mask: 0x%02X\n", g_event_flags_mask); 
-        }
+	/* The watchdog block also makes the 1 us tick that drives TIMER (TIMERAWL):
+	   every us measurement in the robot (ultrasonic echo, barcode widths, I2C
+	   timeouts) depends on it, and nothing in the kernel sets it up. 2026-11-06:
+	   with S4 running, echo times read ~13x too small (215 us -> 16 us). Set it
+	   to 12 cycles of the 12 MHz clk_ref = exactly 1 us, before anyone uses it. */
+	{
+		UW before = in_w(S4_WDT_TICK);
+		out_w(S4_WDT_TICK, S4_WDT_TICK_ENABLE | S4_WDT_TICK_CYCLES);
+		S4_PRINT("[S4] us tick: was 0x%x, set to %d cycles of 12 MHz (1 us)\n", (UINT)before, (INT)S4_WDT_TICK_CYCLES);
+	}
 
-        sleep_ms(20); 
-    }
+	/* Was the last reset caused by the watchdog? Reported once over telemetry (NFR20). */
+	g_wdt_reset = ((in_w(S4_WDT_REASON) & S4_WDT_REASON_TIMER) != 0u) ? TRUE : FALSE;
+	if (g_wdt_reset) {
+		S4_PRINT("[S4] WATCHDOG_RESET: the last run stopped completing its 20 ms cycles\n");
+	}
+	return E_OK;
+}
 
-    printf("\n[Test] 100 LSM303 Execution Cycles Completed Successfully.\n"); 
-    while (true) {
-        tight_loop_contents(); 
-    }
+EXPORT ER subsystem4_start(void)
+{
+	ID tid;
+
+	/* Safety on core 1 next to Motion Control: core 0 runs USB (pri 3) and WiFi
+	   polling (pri 4), which would delay a 20 ms safety loop placed there. */
+	tid = app_start_task((FP)imu_safety_task, S4_PRI_SAFETY, TP_PRC2, "imu_safety");
+	if (tid < E_OK) {
+		return tid;
+	}
+	tid = app_start_task((FP)imu_terrain_task, S4_PRI_TERRAIN, 0, "imu_terrain");
+	return (tid < E_OK) ? tid : E_OK;
 }

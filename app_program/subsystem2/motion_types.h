@@ -172,6 +172,7 @@ static inline void steer_publish(int8_t correction)
 #define FAULT_BIT_IMU           (1u << 2)
 #define FAULT_BIT_NO_ECHO       (1u << 3)
 #define FAULT_BIT_WIFI          (1u << 4)
+#define FAULT_BIT_IMPACT        (1u << 5)   /* S4: impact or over-tilt (E-stop) */
 
 /* Event-flag bit patterns used by Motion                                   */
 #define ESTOP_BIT               (1u << 0)   /* in flg_estop (set by IMU)     */

@@ -3,7 +3,8 @@
 # Uses the real firmware sources from app_program/subsystem2 with -DHOST_TEST.
 SRC_DIR := ../../../app_program/subsystem2
 CC      ?= gcc
-CFLAGS  := -std=c11 -Wall -Wextra -Wpedantic -O1 -DHOST_TEST -DMOTION_RIGHT_MOTOR_OK=1 -I$(SRC_DIR)
+# HEADING_HOLD=1: the compass code is tested even while it is switched off on the robot
+CFLAGS  := -std=c11 -Wall -Wextra -Wpedantic -O1 -DHOST_TEST -DMOTION_RIGHT_MOTOR_OK=1 -DHEADING_HOLD=1 -I$(SRC_DIR)
 SRCS    := test_motion.c host_mocks.c $(SRC_DIR)/task_motion.c $(SRC_DIR)/drv_encoder.c $(SRC_DIR)/pid.c
 
 all: run

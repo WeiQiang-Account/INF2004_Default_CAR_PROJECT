@@ -51,9 +51,10 @@
  * sys_timeout() user above the stack has to be added here or the pool runs
  * dry and lwip_utk_assert() halts with "pool MEMP_SYS_TIMEOUT is empty":
  * mqtt.c arms its own cyclic keepalive timer per client, and mqtt_utk.c adds
- * the heartbeat chain plus a connect-retry timer. Four covers those with
- * room to spare; each slot is only a few bytes. */
-#define MEMP_NUM_SYS_TIMEOUT        (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 4)
+ * the heartbeat chain plus a connect-retry timer; SE14 subsystem 1 adds its
+ * 200 ms telemetry tick and subsystem 2's optional test one more. Six covers
+ * those with room to spare; each slot is only a few bytes. */
+#define MEMP_NUM_SYS_TIMEOUT        (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 6)
 
 #define LWIP_ARP                    1
 #define LWIP_ETHERNET               1
@@ -90,5 +91,12 @@
 #define LWIP_STATS_DISPLAY          0
 
 #define LWIP_DEBUG                  0
+
+/* SE14 subsystem 1: the telemetry JSON is ~450 bytes and an event (QoS 1)
+ * may be queued next to it, so mqtt.c's 256-byte default output buffer is too
+ * small (mqtt_publish() would return ERR_MEM every time). QoS 1 events and
+ * the subscription each hold a request slot until acknowledged. */
+#define MQTT_OUTPUT_RINGBUF_SIZE    1536   /* telemetry can be ~650 B (2026-11-07) */
+#define MQTT_REQ_MAX_IN_FLIGHT      8
 
 #endif /* LWIP_LWIPOPTS_H */

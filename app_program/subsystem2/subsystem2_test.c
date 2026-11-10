@@ -37,7 +37,48 @@ LOCAL void s2_countdown(const char *what, INT s)
 {
 	tm_printf((UB*)"[MANUAL] %s in %d s ...\n", what, s);
 	tk_dly_tsk((RELTIM)(s * 1000));
+	/* 2026-11-07: putting the robot down can trip the IMU E-stop, which leaves
+	   Motion in FAULT; a FAULT ignores the move, so the robot never drove.
+	   Clear it first (refused only while the IMU still holds the E-stop). */
+	(void)motion_reset();
+	tk_dly_tsk(100);
+	s2_print_status("before the move");
 }
+
+#if (S2_MANUAL_SPEED != 0)
+/* S2-M05: hold 300 mm/s with the wheels in the air. 1 s to settle, then
+   30 samples over 3 s. Pass: every wheel average 270..330 mm/s (+-10 %).
+   Results are printed AND visible on the dashboard (wheel speeds).      */
+LOCAL void s2_speed_test(void)
+{
+	motion_status_t st;
+	INT i, n = 0;
+	INT sum_l = 0, sum_r = 0, min_l = 9999, max_l = -9999, min_r = 9999, max_r = -9999;
+	const INT lo = (S2_MANUAL_SPEED_MMPS * 9) / 10, hi = (S2_MANUAL_SPEED_MMPS * 11) / 10;
+
+	tm_printf((UB*)"\n[MANUAL] S2-M05 speed hold: PROP THE ROBOT UP so both wheels spin freely\n");
+	s2_countdown("S2-M05 wheels at 300 mm/s", 15);
+	motion_ignore_steering(true);			/* no line under the propped-up robot */
+	(void)motion_drive(S2_MANUAL_SPEED_MMPS, FALSE);
+	tk_dly_tsk(1000);					/* speed up and settle */
+	for (i = 0; i < 30; i++) {
+		tk_dly_tsk(100);
+		motion_get_status(&st);
+		sum_l += st.speed_l_mmps; sum_r += st.speed_r_mmps; n++;
+		if (st.speed_l_mmps < min_l) { min_l = st.speed_l_mmps; }
+		if (st.speed_l_mmps > max_l) { max_l = st.speed_l_mmps; }
+		if (st.speed_r_mmps < min_r) { min_r = st.speed_r_mmps; }
+		if (st.speed_r_mmps > max_r) { max_r = st.speed_r_mmps; }
+	}
+	(void)motion_stop();
+	motion_ignore_steering(false);
+	tm_printf((UB*)"[MANUAL] S2-M05 target %d mm/s: left avg %d (min %d, max %d), right avg %d (min %d, max %d)\n",
+		  S2_MANUAL_SPEED_MMPS, sum_l / n, min_l, max_l, sum_r / n, min_r, max_r);
+	tm_printf((UB*)"[MANUAL] S2-M05 %s (both averages must be %d..%d mm/s)\n",
+		  ((sum_l / n >= lo) && (sum_l / n <= hi) && (sum_r / n >= lo) && (sum_r / n <= hi)) ? "PASS" : "FAIL",
+		  lo, hi);
+}
+#endif
 
 /* Guided manual tests: record the measured values in TEST_LOG.md */
 LOCAL void s2_manual_tests(void)
@@ -48,28 +89,58 @@ LOCAL void s2_manual_tests(void)
 	tm_printf((UB*)"\n[MANUAL] NOTE: right motor disabled (MOTION_RIGHT_MOTOR_OK 0)."
 		  " Moves use the LEFT wheel only, so the robot pivots on the right wheel.\n");
 #endif
+#if (S2_MANUAL_SPEED != 0)
+	(void)i;
+	s2_speed_test();
+	tm_printf((UB*)"[MANUAL] subsystem2 manual tests finished (speed test only; S2_MANUAL_SPEED 0 for moves/turns)\n");
+	return;
+#endif
+#if (S2_MANUAL_CPR != 0)
 	tm_printf((UB*)"\n[MANUAL] S2-M01 CPR: lift the robot, turn the LEFT wheel"
 		  " forward exactly 10 turns, then the RIGHT wheel (20 s)\n");
 	for (i = 0; i < 40; i++) {
 		tk_dly_tsk(500);
 		s2_print_status("S2-M01");
 	}
-	tm_printf((UB*)"[MANUAL] S2-M01 CPR = counts / 10 (expected about 937)\n");
+	tm_printf((UB*)"[MANUAL] S2-M01 CPR = counts / 10 (expected about 2535, measured 2026-10-24)\n");
+#else
+	(void)i;
+#endif
 
-	s2_countdown("S2-M02 put the robot on the floor; 1 m forward", 10);
-	(void)motion_move(1000, 300, FALSE);
-	s2_wait_done(8000);
-	s2_print_status("S2-M02 done (measure with a tape: 950..1050 mm)");
+	tm_printf((UB*)"[MANUAL] straight move: %d mm, so after the right turn the right wheel is at %d mm\n",
+		  (INT)S2_MANUAL_MOVE_MM, (INT)S2_MANUAL_MARK_MM);
+	s2_countdown("S2-M02 put the robot on the floor; straight forward", 10);
+	(void)motion_move(S2_MANUAL_MOVE_MM, 150, FALSE);	/* 150 mm/s: gentle start, no IMU E-stop (2026-11-07) */
+	s2_wait_done(12000);
+	s2_print_status("S2-M02 done (measure the distance with a tape)");
+	{
+		INT e10 = (INT)(motion_heading_error() * 10.0f);
+		tm_printf((UB*)"[MANUAL] compass heading hold: %s, heading error at the end %d.%d deg\n",
+			  motion_heading_used() ? "ON" : "off (no compass)",
+			  e10 / 10, ((e10 < 0) ? -e10 : e10) % 10);
+	}
 
-	s2_countdown("S2-M03 90 deg RIGHT turn", 5);
+#if (S2_MANUAL_TURNS != 0)
+#if (S2_MANUAL_TURN_RIGHT != 0)
+	s2_countdown("S2-M03 90 deg RIGHT turn (measure the heading NOW)", S2_MANUAL_PAUSE_S);
 	(void)motion_turn_right(90);
 	s2_wait_done(5000);
 	s2_print_status("S2-M03 done (measure: 85..95 deg)");
+#endif
+#if (S2_MANUAL_AFTER_TURN_MM > 0)
+	s2_countdown("straight on after the right turn", 5);
+	(void)motion_move(S2_MANUAL_AFTER_TURN_MM, 150, FALSE);
+	s2_wait_done(12000);
+	s2_print_status("straight after the turn done (measure distance and drift)");
+#endif
 
-	s2_countdown("S2-M04 90 deg LEFT turn", 5);
+#if (S2_MANUAL_TURN_LEFT != 0)
+	s2_countdown("S2-M04 90 deg LEFT turn (measure the heading NOW)", S2_MANUAL_PAUSE_S);
 	(void)motion_turn_left(90);
 	s2_wait_done(5000);
 	s2_print_status("S2-M04 done (measure: 85..95 deg)");
+#endif
+#endif
 	tm_printf((UB*)"[MANUAL] subsystem2 manual tests finished\n");
 }
 #endif
@@ -145,7 +216,33 @@ EXPORT void subsystem2_test(void)
 		TEST_CHECK("S2-U05", n >= 48 && n <= 52, "20 ms motion period (NFR5)");
 	}
 
-	/* S2-U06: the motion task sleeps between cycles (no busy loop) */
+	/* S2-M06 (software, no logic analyser): the motion task times its own
+	   wake-ups with the 1 us timer for 3 s (about 150 cycles) while this
+	   task just sleeps. Pass: every period 20 ms +-2 ms (18..22 ms).
+	   (2026-11-10: a busy-wait here on core 0 froze the core-1 timing.)  */
+	{
+		uint32_t mn, mx, av, n;
+		motion_period_reset();
+		tk_dly_tsk(3000);
+		motion_period_stats(&mn, &mx, &av, &n);
+		tm_printf((UB*)"[TEST] S2-M06 info: %d periods, avg %d us, min %d us, max %d us, jitter %d us\n",
+			  (INT)n, (INT)av, (INT)mn, (INT)mx, (n > 0u) ? (INT)(mx - mn) : 0);
+		TEST_CHECK("S2-M06", (n >= 140u) && (mn >= 18000u) && (mx <= 22000u),
+			   "motion loop 20 ms +-2 ms, timed by the task itself (NFR5)");
+	}
+
+	/* S2-U06: the motion task sleeps between cycles (no busy loop).
+	   Main check: the task's own record of how long each cycle keeps it busy
+	   (taken in the same 3 s as S2-M06). A cycle must leave the CPU free for
+	   most of its 20 ms. The task-state samples are printed as extra info:
+	   on the dual-core kernel a sample can catch the task mid-cycle.      */
+	{
+		uint32_t bmax, bavg;
+		motion_busy_stats(&bmax, &bavg);
+		tm_printf((UB*)"[TEST] S2-U06 info: work per 20 ms cycle avg %d us, max %d us\n", (INT)bavg, (INT)bmax);
+		TEST_CHECK("S2-U06", (bmax > 0u) && (bmax < 5000u) && (bavg < 1000u),
+			   "motion task works < 5 ms of each 20 ms cycle, sleeps the rest");
+	}
 	{
 		T_RTSK rtsk;
 		INT i, waiting = 0, run = 0, rdy = 0, other = 0;
@@ -165,9 +262,16 @@ EXPORT void subsystem2_test(void)
 		}
 		tm_printf((UB*)"[TEST] S2-U06 info: of 10 samples wait=%d run=%d ready=%d other=%d (state now 0x%x)\n",
 			  waiting, run, rdy, other, (INT)rtsk.tskstat);
-		TEST_CHECK("S2-U06", waiting >= 9, "motion task waits between cycles");
+		/* info only (see above) */
 	}
 
+#if (S2_MANUAL_TESTS != 0)
+	/* 2026-11-09: U07/U08 spin the wheels for 0.1 s, which jolted the robot out
+	   of line just before the guided straight-line test. They run whenever
+	   S2_MANUAL_TESTS is 0.                                               */
+	tm_printf((UB*)"[TEST] S2-U07 SKIP  (manual mode: it spins the wheels)\n");
+	tm_printf((UB*)"[TEST] S2-U08 SKIP  (manual mode)\n");
+#else
 	/* S2-U07: E-stop stops both motors within one cycle (NFR9) */
 	{
 		motion_status_t st;
@@ -201,6 +305,8 @@ EXPORT void subsystem2_test(void)
 			   st2.state == MOTION_STATE_IDLE,
 			   "reset only after the E-stop is cleared");
 	}
+
+#endif /* S2_MANUAL_TESTS */
 
 	TEST_SUMMARY("subsystem2");
 

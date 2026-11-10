@@ -1,6 +1,6 @@
 /* Host-side check of obstacle_profile.c.  Build + run on a PC:
  *   gcc -Wall -Wextra -I../../app_program/subsystem5 host_profile_test.c \
- *       ../../app_program/subsystem5/obstacle_profile.c -o hp && ./hp       */
+ *       ../../app_program/subsystem5/obstacle_profile.c -lm -o hp && ./hp   */
 #include <stdio.h>
 #include <stdlib.h>
 #include "obstacle_profile.h"
@@ -30,7 +30,8 @@ static uint16_t sim_read(int angle, int fwd, int xr, int xl)
 static void run(const char *name, int fwd, int xr, int xl, s5_profile_t *out)
 {
     s5_scan_data_t sd; s5_scan_init(&sd);
-    static const int ang[5] = {30, 60, 90, 120, 150};
+    static const int ang[5] = { S5_SERVO_LIMIT_MIN, (S5_SERVO_LIMIT_MIN + 90) / 2, 90,
+                                (90 + S5_SERVO_LIMIT_MAX) / 2, S5_SERVO_LIMIT_MAX };   /* same as obstacle_scan.c */
     int hit = -1;
     for (int i = 0; i < 5; i++) {
         uint16_t d = sim_read(ang[i], fwd, xr, xl);

@@ -50,6 +50,7 @@ EXPORT ER subsystem5_start(void)
 	   (core 1 runs motion_task + the GPIO IRQ, core 0 runs USB and WiFi polling). */
 	tid_vc = app_start_task((FP)s5_vc_task, S5_PRI_VC, 0, "vc_task");
 	if (tid_vc < E_OK) return tid_vc;
-	tid_scan = app_start_task((FP)s5_scan_task, S5_PRI_SCAN, 0, "scan_task");
+	tid_scan = app_start_task((FP)s5_scan_task, S5_PRI_SCAN, TP_PRC1, "scan_task");	/* core 0: its short
+											   timing window never delays Motion (core 1) */
 	return (tid_scan < E_OK) ? tid_scan : E_OK;
 }

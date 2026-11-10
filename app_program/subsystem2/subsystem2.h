@@ -47,7 +47,7 @@ IMPORT void	s2_telemetry_drive_task(INT stacd, void *exinf);	/* MQTT test only *
  * replaced their example code, then delete example_producer.c.
  * ------------------------------------------------------------------- */
 #ifndef S2_KEEP_TEMPLATE_EXAMPLE
-#define S2_KEEP_TEMPLATE_EXAMPLE	1
+#define S2_KEEP_TEMPLATE_EXAMPLE	0
 #endif
 
 #if S2_KEEP_TEMPLATE_EXAMPLE

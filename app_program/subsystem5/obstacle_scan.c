@@ -11,12 +11,18 @@
 enum { ST_INIT = 0, ST_MONITOR, ST_SCANNING, ST_GUARD, ST_FAULT };      /* 3 bits */
 enum { STG_COARSE = 0, STG_FINE, STG_PROFILE, STG_PLAN };               /* 2 bits */
 
-static const int16_t COARSE_ANG[S5_COARSE_N] = { 30, 60, 90, 120, 150 }; /* FR20 */
+/* FR20: 5 angles spread over the safe range (s5_config.h limits), e.g. 45..135 */
+static const int16_t COARSE_ANG[S5_COARSE_N] = {
+    S5_SERVO_LIMIT_MIN,
+    (S5_SERVO_LIMIT_MIN + S5_SERVO_CENTRE_DEG) / 2,
+    S5_SERVO_CENTRE_DEG,
+    (S5_SERVO_CENTRE_DEG + S5_SERVO_LIMIT_MAX) / 2,
+    S5_SERVO_LIMIT_MAX };
 
 s5_scan_stats_t g_s5_scan;
 static volatile uint8_t  g_status;
 static volatile uint16_t g_last_dist = S5_DIST_NO_ECHO;
-static int  g_state = ST_INIT, g_attempt, g_latched, g_hit, g_nosensor, g_guard_deg;
+static int  g_state = ST_INIT, g_attempt, g_latched, g_hit, g_nosensor, g_guard_deg, g_clear;
 static uint8_t g_stage, g_action;
 
 uint8_t  s5_status_byte(void)       { return g_status; }
@@ -29,7 +35,47 @@ static void set_status(int state, int stage, int action)
 }
 static uint32_t now_ms(void) { SYSTIM t; (void)tk_get_tim(&t); return (uint32_t)t.lo; }
 
-static void go(int deg, int settle_ms) { servo_set_deg(deg); tk_dly_tsk(settle_ms); }
+static volatile int g_servo_now = S5_SERVO_CENTRE_DEG;
+static volatile int g_manual_deg = -1;                            /* -1 = automatic */
+
+/* Move the servo in small steps at S5_SERVO_DEG_PER_S (a jump made the sensor
+   swing and shake, 2026-11-06), then wait for the rest of the settle time. */
+static void go(int deg, int settle_ms)
+{
+    int cur = g_servo_now, travel = 0;
+    if (deg < S5_SERVO_LIMIT_MIN) deg = S5_SERVO_LIMIT_MIN;       /* hard limits (s5_config.h) */
+    if (deg > S5_SERVO_LIMIT_MAX) deg = S5_SERVO_LIMIT_MAX;
+    int step_ms = (S5_SERVO_STEP_DEG * 1000) / S5_SERVO_DEG_PER_S;
+    if (step_ms < 1) step_ms = 1;
+    while (cur != deg) {
+        int d = deg - cur;
+        if (d >  S5_SERVO_STEP_DEG) d =  S5_SERVO_STEP_DEG;
+        if (d < -S5_SERVO_STEP_DEG) d = -S5_SERVO_STEP_DEG;
+        cur += d;
+        servo_set_deg(cur);
+        g_servo_now = cur;
+        tk_dly_tsk(step_ms);
+        travel += step_ms;
+    }
+    servo_set_deg(deg);
+    g_servo_now = deg;
+    settle_ms -= travel;
+    if (settle_ms < S5_SERVO_MIN_SETTLE_MS) settle_ms = S5_SERVO_MIN_SETTLE_MS;
+    tk_dly_tsk(settle_ms);
+}
+
+/* dashboard servo test (via S1). Any task may call it: only the scan task moves the servo. */
+void s5_servo_manual(int deg)
+{
+    if (deg >= 0) {
+        if (deg < S5_SERVO_LIMIT_MIN) deg = S5_SERVO_LIMIT_MIN;
+        if (deg > S5_SERVO_LIMIT_MAX) deg = S5_SERVO_LIMIT_MAX;
+    }
+    g_manual_deg = (deg < 0) ? -1 : deg;
+    s5_scan_request(S5_REQ_SERVO);
+}
+int s5_servo_angle(void)     { return g_servo_now; }
+int s5_servo_is_manual(void) { return g_manual_deg >= 0; }
 
 /* returns 1 if the sensor is now considered faulty */
 static int note_status(us_status_t st)
@@ -67,7 +113,18 @@ static void monitor_tick(void)
             vc_post(VC_EV_MAKE(VC_EV_OBSTACLE, d));
             S5_PRINT("[S5] obstacle at %u mm\n", d);
         }
-    } else g_hit = 0;
+    } else {
+        g_hit = 0;
+        /* 2026-11-06: the latch stayed set forever after an obstacle was seen while
+           the robot was NOT running (the VC ignores it then), so later obstacles
+           were never reported and the robot drove into them. Re-arm once the
+           path ahead has been clear for a few pings.                          */
+        if ((d == S5_DIST_NO_ECHO) || (d >= S5_OBSTACLE_TRIGGER_MM + S5_UNLATCH_MARGIN_MM)) {
+            if (g_latched && (++g_clear >= S5_UNLATCH_PINGS)) { g_latched = 0; g_clear = 0; }
+        } else {
+            g_clear = 0;
+        }
+    }
 }
 
 /* ---- BYPASS_GUARD: watch the obstacle while VC drives past it ------------- */
@@ -165,7 +222,8 @@ static void do_scan(int is_rescan)
         prof.action = S5_ACT_CONTINUE;
         set_status(ST_SCANNING, STG_PLAN, prof.action);
         g_s5_scan.coarse_ms = coarse_ms; g_s5_scan.total_ms = coarse_ms; g_s5_scan.action = prof.action;
-        g_s5_scan.closest_mm = 0; g_s5_scan.width_mm = 0; g_s5_scan.count++;
+        g_s5_scan.closest_mm = 0; g_s5_scan.width_mm = 0;
+        g_s5_scan.clr_l_mm = 0; g_s5_scan.clr_r_mm = 0; g_s5_scan.count++;
         post_profile(&prof);
         enter_monitor();
         return;
@@ -186,6 +244,7 @@ static void do_scan(int is_rescan)
               (int)prof.action, (unsigned)(now_ms() - t0));
     g_s5_scan.coarse_ms = coarse_ms; g_s5_scan.total_ms = now_ms() - t0;
     g_s5_scan.action = prof.action; g_s5_scan.closest_mm = prof.closest_mm; g_s5_scan.width_mm = prof.width_mm;
+    g_s5_scan.clr_l_mm = prof.clr_l_mm; g_s5_scan.clr_r_mm = prof.clr_r_mm;
     g_s5_scan.count++;
     post_profile(&prof);
     go(S5_SERVO_CENTRE_DEG, S5_SETTLE_COARSE_MS);
@@ -198,6 +257,13 @@ EXPORT void s5_scan_task(INT stacd, void *exinf)
     set_status(ST_INIT, 0, 0);
     uint16_t d;
     for (int w = 0; (w < 100) && !gpio_irq_is_enabled(); w++) tk_dly_tsk(10);   /* motion_task (core 1) enables IRQ 13 */
+#if S5_SERVO_BOOT_WIGGLE
+    /* visible check that the servo follows the code: look left, right, then straight ahead */
+    S5_PRINT("[S5] servo check: left, right, centre (%d deg)\n", S5_SERVO_CENTRE_DEG);
+    go(S5_SERVO_CENTRE_DEG + 30, 400);
+    go(S5_SERVO_CENTRE_DEG - 30, 400);
+    go(S5_SERVO_CENTRE_DEG, 300);
+#endif
     for (int i = 0; i < 3; i++) {                                 /* test ping (INITIALISING) */
         go(S5_SERVO_CENTRE_DEG, S5_SETTLE_FIRST_MS);
         us_status_t st = us_ping(&d);
@@ -228,6 +294,19 @@ EXPORT void s5_scan_task(INT stacd, void *exinf)
         if (er != E_OK) continue;
         if (g_state == ST_FAULT) continue;                        /* ignore requests while faulty */
 
+        if (ptn & S5_REQ_SERVO) {                                 /* dashboard servo test */
+            if (g_manual_deg >= 0) {
+                go(g_manual_deg, 50);                             /* stays there; monitor pings at this angle */
+                S5_PRINT("[S5] servo manual: %d deg (+ trim %d)\n", g_manual_deg, (int)S5_SERVO_TRIM_DEG);
+            } else {
+                enter_monitor();                                  /* automatic: straight ahead */
+                S5_PRINT("[S5] servo automatic\n");
+            }
+            if ((ptn & ~S5_REQ_SERVO) == 0u) continue;
+        }
+        if (ptn & (S5_REQ_SCAN | S5_REQ_RESCAN | S5_REQ_GUARD_R | S5_REQ_GUARD_L)) {
+            g_manual_deg = -1;                                    /* the mission needs the servo back */
+        }
         if (ptn & S5_REQ_BYPASS_DONE) {                           /* line re-acquired */
             g_attempt = 0; g_latched = 0;
             enter_monitor();

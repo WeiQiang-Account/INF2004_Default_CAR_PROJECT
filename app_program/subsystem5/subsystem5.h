@@ -35,7 +35,8 @@ IMPORT ID sem_echo;		/* echo branch -> Ultrasonic Scan */
 #define S5_REQ_GUARD_L		(1u << 3)
 #define S5_REQ_GUARD_OFF	(1u << 4)
 #define S5_REQ_BYPASS_DONE	(1u << 5)	/* line re-acquired: reset attempts            */
-#define S5_REQ_ALL		0x3Fu
+#define S5_REQ_SERVO		(1u << 6)	/* manual servo angle changed (dashboard)      */
+#define S5_REQ_ALL		0x7Fu
 
 /* Internal, shared between the S5 files */
 IMPORT void s5_scan_task(INT stacd, void *exinf);
@@ -50,6 +51,8 @@ typedef struct {
 	volatile UW	action;		/* s5_action_t                     */
 	volatile UW	closest_mm;
 	volatile UW	width_mm;
+	volatile UW	clr_l_mm;	/* free space left / right of the obstacle (0 = none) */
+	volatile UW	clr_r_mm;
 } s5_scan_stats_t;
 IMPORT s5_scan_stats_t g_s5_scan;
 

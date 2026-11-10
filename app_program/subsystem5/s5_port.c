@@ -52,5 +52,7 @@ void s5_fault_set(int on)
 
 /* ------------------------------------------------------------------ weak hooks */
 __attribute__((weak)) int s5_hook_line_detected(void) { return 0; }	/* Buddy 3 overrides */
+__attribute__((weak)) int s5_hook_line_lost(void)     { return -1; }	/* Buddy 3 overrides; -1 = use the LINE_LOST event only */
+__attribute__((weak)) int s5_hook_line_ready(void)    { return 1; }	/* Buddy 3 overrides */
 __attribute__((weak)) int s5_hook_imu_ready(void)     { return 1; }	/* Buddy 4 overrides */
 __attribute__((weak)) int s5_hook_remote_poll(void)   { return 0; }	/* Buddy 1 overrides */

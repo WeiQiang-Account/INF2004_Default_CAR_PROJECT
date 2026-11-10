@@ -36,6 +36,7 @@ static const int8_t  k_sign[ENC_COUNT]  = { ENC_L_SIGN,  ENC_R_SIGN  };
 static volatile int32_t  s_count[ENC_COUNT];	/* written by IRQ only */
 static volatile uint32_t s_errors[ENC_COUNT];	/* written by IRQ only */
 static volatile uint8_t  s_prev_ab[ENC_COUNT];	/* IRQ only            */
+static volatile int8_t   s_last_step[ENC_COUNT];	/* IRQ only: +1 / -1 of the last good step */
 static uint32_t          s_errors_seen[ENC_COUNT];	/* motion task only */
 
 static inline uint8_t enc_ab(enc_wheel_t w, uint32_t levels)
@@ -53,8 +54,16 @@ void encoder_on_edge(enc_wheel_t wheel, uint32_t levels)
 
 	if (step != 0) {
 		s_count[wheel] = s_count[wheel] + ((int32_t)step * (int32_t)k_sign[wheel]);
+		s_last_step[wheel] = step;
 	} else if (cur != s_prev_ab[wheel]) {
-		s_errors[wheel] = s_errors[wheel] + 1u;	/* missed an edge */
+		/* Both A and B changed: one edge was missed, so the wheel moved TWO
+		   steps. The direction cannot be read from the pins, but a wheel cannot
+		   reverse in one step, so keep the last direction. 2026-11-07: dropping
+		   these made the left wheel read ~1 % short, and the straight-line
+		   correction then drove the left wheel further: the robot drifted
+		   25 mm to the right over 1 m.                                       */
+		s_count[wheel] = s_count[wheel] + (2 * (int32_t)s_last_step[wheel] * (int32_t)k_sign[wheel]);
+		s_errors[wheel] = s_errors[wheel] + 1u;	/* still counted, for telemetry */
 	} else {
 		/* same state again (contact bounce): ignore */
 	}
@@ -65,6 +74,12 @@ void encoder_read(int32_t *p_left, int32_t *p_right)
 {
 	*p_left  = s_count[ENC_LEFT];
 	*p_right = s_count[ENC_RIGHT];
+}
+
+/* total skipped steps since start (read-only, for telemetry) */
+uint32_t encoder_error_total(enc_wheel_t wheel)
+{
+	return s_errors[wheel];
 }
 
 uint32_t encoder_new_errors(enc_wheel_t wheel)
@@ -104,6 +119,7 @@ void encoder_init(void)
 		s_count[w] = 0;
 		s_errors[w] = 0;
 		s_errors_seen[w] = 0;
+		s_last_step[w] = 0;
 		s_prev_ab[w] = enc_ab((enc_wheel_t)w, (uint32_t)in_w(GPIO_IN));
 	}
 	gpio_irq_register(ENC_L_PIN_A, enc_branch_left);
@@ -123,7 +139,7 @@ void encoder_test_reset(void)
 {
 	uint32_t w;
 	for (w = 0; w < (uint32_t)ENC_COUNT; w++) {
-		s_count[w] = 0; s_errors[w] = 0; s_errors_seen[w] = 0; s_prev_ab[w] = 0;
+		s_count[w] = 0; s_errors[w] = 0; s_errors_seen[w] = 0; s_prev_ab[w] = 0; s_last_step[w] = 0;
 	}
 }
 #endif

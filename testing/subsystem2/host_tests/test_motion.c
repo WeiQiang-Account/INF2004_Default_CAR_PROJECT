@@ -82,6 +82,18 @@ static void run_ms(uint32_t ms)
 
 static float heading_deg(void) { return (P.s[0] - P.s[1]) / TRACK_WIDTH_MM * 57.29578f; }
 
+/* Fake compass for the heading-hold test. Off by default (= no compass), so
+   every other test runs on counts only, as on a robot without a compass.
+   heading_deg() above is + for a RIGHT turn; the compass is + for LEFT.     */
+static int   s_compass_on;
+static float s_compass_twist;          /* extra LEFT twist the encoders did not see (slip) */
+bool s2_hook_heading(float *deg)
+{
+    if (!s_compass_on) { return false; }
+    *deg = -heading_deg() + s_compass_twist + 37.0f;   /* any start value works */
+    return true;
+}
+
 static void system_reset(void)
 {
     motion_links_t links;
@@ -128,6 +140,15 @@ static void test_quadrature(void)
     CHECK(l == 0, "reverse 4 cycles should return to 0, got %d", (int)l);
     encoder_on_edge(ENC_LEFT, (1u << ENC_L_PIN_A) | (1u << ENC_L_PIN_B));   /* 00 -> 11 : skipped */
     CHECK(encoder_new_errors(ENC_LEFT) == 1u, "skipped step should count as an error");
+    encoder_read(&l, &r);
+    CHECK(l == -2, "skip while reversing is counted as 2 more steps back, got %d", (int)l);
+    /* skip while going forward: 2 steps forward are kept, not lost */
+    encoder_test_reset();
+    for (i = 0; i < 8; i++) { encoder_on_edge(ENC_LEFT, seq[i % 4]); }     /* +8, now at 00 */
+    encoder_on_edge(ENC_LEFT, (1u << ENC_L_PIN_A) | (1u << ENC_L_PIN_B));   /* 00 -> 11 skipping 10 */
+    encoder_on_edge(ENC_LEFT, seq[2]);                                      /* 11 -> 01 normal */
+    encoder_read(&l, &r);
+    CHECK(l == 11, "forward skip recovered: 8 + 2 + 1 = 11, got %d", (int)l);
     /* right wheel is mirrored (sign -1) */
     encoder_test_reset();
     {
@@ -183,8 +204,8 @@ static void test_pid(void)
 static void test_selftest_and_conversions(void)
 {
     printf("[conversions + self-test]\n");
-    CHECK(fabsf(ENC_CPR - 937.2f) < 0.5f, "CPR about 937 (got %.1f)", ENC_CPR);
-    CHECK(fabsf(MM_PER_COUNT - 0.2179f) < 0.001f, "about 0.22 mm per count (got %.4f)", MM_PER_COUNT);
+    CHECK(fabsf(ENC_CPR - 2535.0f) < 0.5f, "CPR 2535 as measured 2026-10-24 (got %.1f)", ENC_CPR);
+    CHECK(fabsf(MM_PER_COUNT - 0.0828f) < 0.001f, "about 0.083 mm per count, 66.8 mm effective wheel (got %.4f)", MM_PER_COUNT);
     system_reset();
     CHECK(state_now() == MOTION_STATE_IDLE, "self-test passes and enters IDLE (state %d)", state_now());
 
@@ -213,6 +234,31 @@ static void test_distance(void)
     printf("  travelled %.1f mm, heading drift %.2f deg\n", travelled, heading_deg());
 }
 
+static void test_heading_hold(void)
+{
+    printf("[compass heading hold]\n");
+    /* the robot gets knocked 4 deg LEFT just after the start (a slip the
+       encoders cannot see): the compass must steer it back, i.e. the true
+       heading ends 4 deg RIGHT of the wheel-count heading                   */
+    system_reset();
+    s_compass_on = 1; s_compass_twist = 0.0f;
+    CHECK(motion_move(1000, 150, false), "queued");
+    run_ms(300);
+    s_compass_twist = 4.0f;
+    run_ms(9000);
+    CHECK(move_done(), "move finished with the compass on");
+    CHECK(motion_heading_used(), "the move used the compass");
+    CHECK(fabsf(heading_deg() - 4.0f) <= 1.0f, "compass error steered out: wheel heading %.2f (expect +4)", heading_deg());
+    CHECK(fabsf(motion_heading_error()) <= 1.0f, "compass error at the end %.2f deg", motion_heading_error());
+    /* no twist: right motor 10 %% weaker, still straight */
+    system_reset();
+    s_compass_twist = 0.0f;
+    (void)motion_move(1000, 150, false);
+    run_ms(9000);
+    CHECK(fabsf(heading_deg()) <= 1.0f, "straight with the compass: %.2f deg", heading_deg());
+    s_compass_on = 0;
+}
+
 static void test_turn(void)
 {
     printf("[90 deg turns]\n");
@@ -220,12 +266,14 @@ static void test_turn(void)
     CHECK(motion_turn_right(90), "queued");
     run_ms(4000);
     CHECK(move_done(), "turn done flag");
-    CHECK(fabsf(heading_deg() - 90.0f) <= 5.0f, "right turn within +-5 deg (NFR8): %.2f", heading_deg());
+    /* the simulated wheels do not scrub, so it turns exactly 90 x TURN_SCALE
+       (TURN_SCALE corrects the real robot's tyre scrub) */
+    CHECK(fabsf(heading_deg() - (90.0f * TURN_SCALE)) <= 5.0f, "right turn = 90 x TURN_SCALE within +-5 deg: %.2f", heading_deg());
     printf("  right turn: %.2f deg\n", heading_deg());
     system_reset();
     motion_turn_left(90);
     run_ms(4000);
-    CHECK(fabsf(heading_deg() + 90.0f) <= 5.0f, "left turn within +-5 deg: %.2f", heading_deg());
+    CHECK(fabsf(heading_deg() + (90.0f * TURN_SCALE)) <= 5.0f, "left turn = 90 x TURN_SCALE within +-5 deg: %.2f", heading_deg());
     printf("  left turn: %.2f deg\n", heading_deg());
 }
 
@@ -257,6 +305,14 @@ static void test_steering(void)
     CHECK(st.steer_stale, "steering marked stale after 60 ms");
     run_ms(600);
     CHECK(fabsf(P.v[0] - P.v[1]) < 25.0f, "stale steering -> correction zero (%.0f vs %.0f)", P.v[0], P.v[1]);
+
+    /* full steer at slow speed (IMU-lost mode, 100 mm/s): inner wheel keeps going forward, no stall */
+    system_reset();
+    motion_drive(100, false);
+    for (i = 0; i < 400; i++) { steer_publish(100); run_ms(5); }
+    motion_get_status(&st);
+    CHECK(P.v[1] > 15.0f && P.v[0] > P.v[1], "full steer at 100 mm/s: inner wheel still forward (%.0f vs %.0f)", P.v[0], P.v[1]);
+    CHECK(st.state == MOTION_STATE_DRIVING, "full steer at 100 mm/s: no stall fault (state %d)", st.state);
 }
 
 static void test_estop(void)
@@ -330,6 +386,7 @@ int main(void)
     test_pid();
     test_selftest_and_conversions();
     test_distance();
+    test_heading_hold();
     test_turn();
     test_speed_hold();
     test_steering();

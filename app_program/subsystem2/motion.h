@@ -35,6 +35,12 @@ bool     motion_turn_right(int32_t angle_deg);
 bool     motion_uturn(void);
 bool     motion_stop(void);
 bool     motion_reset(void);
+void     motion_ignore_steering(bool on);   /* test only: drive with no line steering */
+void     motion_period_reset(void);           /* S2-M06: start timing the loop     */
+void     motion_period_stats(uint32_t *p_min, uint32_t *p_max, uint32_t *p_avg, uint32_t *p_n);   /* us */
+void     motion_busy_stats(uint32_t *p_max, uint32_t *p_avg);   /* us of work per cycle, same window */
+float    motion_heading_error(void);   /* compass heading error in the last move, deg */
+bool     motion_heading_used(void);    /* the last move held a compass heading        */
 
 /* Latest status, consistent copy, safe from any task on either core */
 void     motion_get_status(motion_status_t *p_out);

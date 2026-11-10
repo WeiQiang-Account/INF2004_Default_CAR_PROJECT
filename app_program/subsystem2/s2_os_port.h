@@ -29,6 +29,7 @@ int32_t  os_mbf_recv_poll(os_id_t mbf, void *p_msg);   /* size, or -1 if empty *
 
 /* Time */
 uint32_t os_now_ms(void);
+uint32_t os_now_us(void);            /* free-running 1 us timer (loop timing check) */
 void     os_sleep_ms(uint32_t ms);
 
 #endif /* S2_OS_PORT_H */

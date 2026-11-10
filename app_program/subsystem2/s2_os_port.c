@@ -51,6 +51,11 @@ uint32_t os_now_ms(void)
 	return (uint32_t)t.lo;
 }
 
+uint32_t os_now_us(void)
+{
+	return (uint32_t)in_w(TIMER_TIMERAWL);
+}
+
 void os_sleep_ms(uint32_t ms)
 {
 	(void)tk_dly_tsk((RELTIM)ms);

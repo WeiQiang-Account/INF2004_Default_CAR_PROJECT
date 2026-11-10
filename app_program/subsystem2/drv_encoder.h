@@ -27,6 +27,8 @@ void     encoder_read(int32_t *p_left, int32_t *p_right);
 
 /* Skipped quadrature steps since the last call (motion task only) */
 uint32_t encoder_new_errors(enc_wheel_t wheel);
+/* Total skipped steps since start (read-only, any task: telemetry) */
+uint32_t encoder_error_total(enc_wheel_t wheel);
 
 #ifdef HOST_TEST
 void     encoder_test_inject(enc_wheel_t wheel, int32_t counts);

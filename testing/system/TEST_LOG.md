@@ -10,8 +10,9 @@ Define a test here before running it. Test IDs never change.
 
 | ID | What is tested | Requirement / interface | Method | Steps / how | Expected result |
 |---|---|---|---|---|---|
-| SYS-01 | e.g. device reports a reading over WiFi every 10 s | REQ-? | manual | 1. Power on. 2. Watch the dashboard for 2 minutes. | a reading appears every 10 s ± 1 s |
-| SYS-02 | | | manual | 1. … 2. … | |
+| SYS-01 | full mission on the track: line, barcodes, hump, obstacle, finish | all FR | manual | 1. Normal build, power bank only. 2. Calibrate IR on the track. 3. START. 4. Video robot + dashboard to the end. | MISSION COMPLETE, no FAULT; time and hump peak recorded |
+| SYS-02 | live telemetry during the run | 6.5, IF-18 | manual | dashboard open during SYS-01 | ~5 telemetry msg/s, state and events match the robot |
+| SYS-03 | safety stop and recovery while driving | NFR9, NFR14 | manual | 1. Robot RUNNING. 2. Firm tap on the chassis. 3. RESET, START. | wheels stop at once (FAULT), RESET → READY, START drives again |
 
 *Method:* **auto** = `TEST_CHECK` in code, result printed on the console;
 **manual** = a person observes the result (LED, scope, meter, phone app…).
@@ -22,4 +23,3 @@ Add a new row for every run. Never edit or delete old rows.
 
 | Date | Test ID | Commit | Tester | Result | Log / evidence | Notes |
 |---|---|---|---|---|---|---|
-| YYYY-MM-DD | SYS-01 | `abc1234` | | PASS / FAIL | `logs/YYYY-MM-DD_….txt` | |

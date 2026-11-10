@@ -13,6 +13,7 @@
 #include "subsystem5.h"
 #include "s5_port.h"
 #include "s5_hw.h"
+#include "vc_events.h"
 
 enum { VC_INIT = 0, VC_READY, VC_RUNNING, VC_PAUSED, VC_FAULT, VC_COMPLETE };
 enum { NAV_LINE = 0, NAV_BARCODE, NAV_OBSTACLE, NAV_RECOVERY };
@@ -29,7 +30,7 @@ static struct {
     int8_t   side;                 /* +1 left, -1 right */
     uint8_t  on_hump, degraded, cause, use_rescan;
     uint16_t hump_peak_mm;
-    uint32_t t_state, t_step, t_seek, lost_since, rescan_at, buzz_off_at;
+    uint32_t t_state, t_step, t_seek, lost_since, found_since, rescan_at, buzz_off_at;
     int      lat_mm, fwd_mm;
     uint8_t  seek_hits, btn_start_cnt, btn_stop_cnt;
 } vc;
@@ -41,6 +42,7 @@ static void update_status(void)
 }
 uint8_t  vc_status_byte(void)      { return g_status; }
 uint32_t vc_dropped_events(void)   { return g_dropped; }
+uint8_t  vc_fault_cause(void)      { return vc.cause; }   /* why the last FAULT happened (CAUSE_*) */
 
 /* ---------------------------------------------------------------- posting API */
 int vc_post2(uint32_t w0, uint32_t w1)
@@ -74,7 +76,7 @@ static void enter_fault(int cause)
 {
     s5_motion_stop();
     s5_scan_request(S5_REQ_GUARD_OFF);
-    vc.cause = (uint8_t)cause; vc.step = OA_IDLE; vc.lost_since = 0; vc.rescan_at = 0;
+    vc.cause = (uint8_t)cause; vc.step = OA_IDLE; vc.lost_since = 0; vc.found_since = 0; vc.rescan_at = 0;
     to_state(VC_FAULT);
     buzz(1000);
     S5_PRINT("[VC] FAULT cause=%d\n", cause);
@@ -85,13 +87,13 @@ static void pause_mission(const char *why)
     vc.hist = vc.nav;                                /* shallow history (H) */
     s5_motion_stop();
     s5_scan_request(S5_REQ_GUARD_OFF);
-    vc.lost_since = 0; vc.rescan_at = 0;
+    vc.lost_since = 0; vc.found_since = 0; vc.rescan_at = 0;
     to_state(VC_PAUSED);
     buzz(300);
     S5_PRINT("[VC] PAUSED (%s), history nav=%d\n", why, vc.hist);
 }
 
-static void nav_to(int n) { vc.nav = (uint8_t)n; update_status(); }
+static void nav_to(int n) { if (n != vc.nav) { vc.lost_since = 0; vc.found_since = 0; } vc.nav = (uint8_t)n; update_status(); }   /* fresh line-lost timer per mode */
 
 static void step_to(int s) { vc.step = (uint8_t)s; vc.t_step = now_ms(); }
 
@@ -195,13 +197,19 @@ static void on_profile(const uint32_t w[2])
 /* ---------------------------------------------------------------- mission control */
 static void start_run(void)
 {
-    to_state(VC_RUNNING); nav_to(NAV_LINE); vc.step = OA_IDLE; vc.lost_since = 0;
+    if (s5_servo_is_manual()) s5_servo_manual(-1);           /* dashboard servo test: back to automatic */
+    s5_scan_request(S5_REQ_GUARD_OFF);                       /* fresh start: re-arm obstacle detection */
+    s5_motion_reset();   /* 2026-11-07: an E-stop while READY (robot picked up / knocked) left S2 in
+                            FAULT, which ignores DRIVE, so START did nothing. No-op if S2 is fine. */
+    to_state(VC_RUNNING); nav_to(NAV_LINE); vc.step = OA_IDLE; vc.lost_since = 0; vc.found_since = 0;
     cruise();
     S5_PRINT("[VC] RUNNING\n");
 }
 
 static void resume(void)
 {
+    if (s5_servo_is_manual()) s5_servo_manual(-1);
+    s5_motion_reset();                               /* same as start_run(): clear an S2 E-stop seen while PAUSED */
     to_state(VC_RUNNING);
     switch (vc.hist) {
     case NAV_OBSTACLE:                               /* restart the scan from standstill */
@@ -257,7 +265,7 @@ static void on_event(const uint32_t w[2])
         }
         break;
     case VC_EV_LINE_LOST:  if (vc.nav == NAV_LINE && !vc.lost_since) vc.lost_since = now_ms(); break;
-    case VC_EV_LINE_FOUND: vc.lost_since = 0; break;
+    case VC_EV_LINE_FOUND: if (s5_hook_line_lost() < 0) vc.lost_since = 0; break;   /* polled path decides (needs a steady line) */
     case VC_EV_OBSTACLE:   if (vc.nav == NAV_LINE) oa_begin(); break;
     case VC_EV_PROFILE:    on_profile(w); break;
     case VC_EV_TOO_CLOSE:  if (vc.nav == NAV_OBSTACLE && vc.step == B4_FWD) pause_mission("too close during bypass"); break;
@@ -291,8 +299,14 @@ static void tick(void)
 
     switch (vc.state) {
     case VC_INIT:
-        if (s5_motion_ready() && s5_hook_imu_ready()) { to_state(VC_READY); S5_PRINT("[VC] READY - press START (GP20)\n"); }
-        else if (t - vc.t_state > 5000) enter_fault(CAUSE_INIT);
+        /* READY only once Motion passed its self-test, the IMU is calibrated (or LOST) and the
+           IR sensors are calibrated: otherwise START would drive with no steering */
+        if (s5_motion_ready() && s5_hook_imu_ready() && s5_hook_line_ready()) { to_state(VC_READY); S5_PRINT("[VC] READY - press START (GP20)\n"); }
+        else if (s5_motion_ready() && s5_hook_imu_ready()) {
+            /* only the IR calibration is missing: wait as long as it takes (S3 keeps retrying), no FAULT */
+            if (t - vc.t_state > S5_INIT_TMO_MS) { vc.t_state = t; S5_PRINT("[VC] waiting for IR calibration - sweep the sensors over black and white\n"); }
+        }
+        else if (t - vc.t_state > S5_INIT_TMO_MS) enter_fault(CAUSE_INIT);
         break;
 
     case VC_RUNNING:
@@ -313,9 +327,26 @@ static void tick(void)
         } else if (vc.step == OA_WAIT_PROFILE && t - vc.t_step > S5_PROFILE_TMO_MS) {
             enter_fault(CAUSE_TIMEOUT);
         }
-        if (vc.lost_since && vc.nav == NAV_LINE) {
-            if (s5_hook_line_detected()) vc.lost_since = 0;
-            else if (t - vc.lost_since > S5_LINE_LOST_TMO_MS) enter_fault(CAUSE_LINE_LOST);
+        if (vc.nav == NAV_LINE) {
+            int lost = s5_hook_line_lost();
+            if (lost >= 0) {
+                /* Line Follow reports its state directly: the timer runs for as long
+                   as the line is really lost and only resets when it is really found */
+                if (!lost) {                            /* only a STEADY line cancels it */
+                    if (vc.lost_since) {
+                        if (!vc.found_since) vc.found_since = t ? t : 1u;
+                        else if (t - vc.found_since >= S5_LINE_FOUND_MS) { vc.lost_since = 0; vc.found_since = 0; }
+                    }
+                }
+                else {
+                    vc.found_since = 0;
+                    if (!vc.lost_since) vc.lost_since = t ? t : 1u;
+                    else if (t - vc.lost_since > S5_LINE_LOST_TMO_MS) enter_fault(CAUSE_LINE_LOST);
+                }
+            } else if (vc.lost_since) {                 /* no Line Follow status: event-based */
+                if (s5_hook_line_detected()) vc.lost_since = 0;
+                else if (t - vc.lost_since > S5_LINE_LOST_TMO_MS) enter_fault(CAUSE_LINE_LOST);
+            }
         }
         break;
     default: break;

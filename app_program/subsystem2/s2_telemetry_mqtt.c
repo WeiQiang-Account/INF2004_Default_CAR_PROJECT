@@ -9,12 +9,12 @@
  *	and S2_TELEMETRY_TEST = 1 (motion_config.h). Set it to 0 when Buddy 1's
  *	telemetry takes over.
  *
- *	Every 200 ms it publishes one JSON line on "se14/robot/telemetry", e.g.
+ *	Every 200 ms it publishes one JSON line on "se14/robot/s2test", e.g.
  *	  {"seq":12,"state":"DRIVING","cause":0,"v_l":201,"v_r":0,
  *	   "dist_mm":350,"enc_l":2210,"enc_r":0,"d_l":46,"d_r":0}
  *
  *	All lwIP calls run on the template's Wi-Fi task (core 0), as lwIP
- *	requires: the template's mqtt_utk.c calls mqtt_utk_on_connected() from
+ *	requires: subsystem 1 calls s2_telemetry_test_on_connected() from
  *	that task, and sys_timeout() keeps the 200 ms tick on that same task.
  *	Reading the motion status from here is safe: motion_get_status() uses
  *	a sequence lock and encoder_read() reads 32-bit words.
@@ -32,7 +32,7 @@
 #include "motion.h"
 #include "drv_encoder.h"
 
-#define S2_TELEM_TOPIC		"se14/robot/telemetry"
+#define S2_TELEM_TOPIC		"se14/robot/s2test"	/* telemetry topic belongs to S1 */
 #define S2_TELEM_PERIOD_MS	(200)
 
 /* Current move of the drive pattern (s2_telemetry_drive.c) */
@@ -60,8 +60,10 @@ static void publish_done(void *arg, err_t result)
 	}
 }
 
-/* Called by mqtt_utk.c (template) each time the broker accepts us. */
-void mqtt_utk_on_connected(mqtt_client_t *client)
+/* Called by subsystem 1 (s1_mqtt.c) each time the broker accepts us. S1 owns
+ * mqtt_utk_on_connected(); this is its weak test hook (IF-13). */
+void s2_telemetry_test_on_connected(mqtt_client_t *client);
+void s2_telemetry_test_on_connected(mqtt_client_t *client)
 {
 	s_client = client;
 	sys_untimeout(telem_tick, NULL);	/* only one chain, even after a reconnect */
