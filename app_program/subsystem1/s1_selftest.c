@@ -24,7 +24,10 @@ static s1_snapshot_t busy(void)		/* every field at a large value: longest JSON *
 	s.spd_l = -1024; s.spd_r = -1024; s.enc_l = -2000000000; s.enc_r = -2000000000;
 	s.m_cause = 4; s.enc_err_l = 99999u; s.enc_err_r = 99999u;
 	s.es_why = 3; s.es_cg = 65535; s.es_tilt = 65535; s.a_pk_cg = 65535; s.hdg = -180;
-	s.dist_mm = 65535; s.line = -100; s.ir[0] = s.ir[1] = s.ir[2] = 4095; s.bar = 3;
+	s.dist_mm = 65535; s.line = -100; s.ir[0] = s.ir[1] = s.ir[2] = 4095; s.bar = 'D';
+	s.bar_pend = 'Z'; s.bar_act = 1; s.map[0] = 'A'; s.map[1] = 'B'; s.map[2] = 'C'; s.map[3] = 'D';
+	s.bar_count = 4000000000u; s.bar_err = 4000000000u; s.bar_why = 12; s.bar_n = 29; s.bar_edges = 4000000000u;
+	s.junc_seen = 65535; s.junc = 65535; s.j_act = 1; s.j_ch = 'X'; s.line_lost = 1; s.lost_ms = 60000;
 	s.hump_mm = 511; s.hump_max_mm = 511; s.pitch_x10 = -900; s.mclass = 3;
 	s.obs_mm = 4000; s.obs_w_mm = 4000; s.clr_l_mm = 4000; s.clr_r_mm = 4000; s.act = 4;
 	s.faults = 0xFFFFFFFFu;
@@ -35,15 +38,17 @@ static s1_snapshot_t busy(void)		/* every field at a large value: longest JSON *
 }
 
 /* S1-U01: telemetry is one flat JSON object with the design's fields; the
-   longest case stays under 700 B (the publish buffer in s1_mqtt.c is 768 B) */
+   longest case stays under 960 B (the publish buffer in s1_mqtt.c is 1024 B) */
 bool s1_st_telemetry(void)
 {
-	static char b[768];	/* static: the test runs on the 1 KB initial-task stack (2026-11-07: on the stack it crashed the TEST build) */
-	s1_snapshot_t s = busy();
+	static char b[1024];	/* static: the test runs on the 1 KB initial-task stack (2026-11-07: on the stack it crashed the TEST build) */
+	static s1_snapshot_t s;	/* static: 1 KB initial-task stack in the TEST build */
+	s = busy();
 	uint16_t n = s1_json_telemetry(b, sizeof b, &s);
-	return (n > 0u) && (n < 700u) && (b[0] == '{') && (b[n - 1u] == '}') &&
+	return (n > 0u) && (n < 960u) && (b[0] == '{') && (b[n - 1u] == '}') &&
 	       has(b, n, "\"state\":\"COMPLETE\"") && has(b, n, "\"enc_l\":-2000000000") &&
-	       has(b, n, "\"ir\":[4095,4095,4095]") && has(b, n, "\"bar\":\"uturn\"") &&
+	       has(b, n, "\"ir\":[4095,4095,4095]") && has(b, n, "\"bar\":\"D\"") && has(b, n, "\"map\":\"ABCD\"") &&
+	       has(b, n, "\"bar_p\":\"Z\"") && has(b, n, "\"lost_ms\":60000") &&
 	       has(b, n, "\"pitch\":-900") && has(b, n, "\"fault\":4294967295");
 }
 
@@ -73,6 +78,15 @@ bool s1_st_parse(void)
 		ok = ok && s1_cmd_int(sa, LEN(sa), "deg", &d) && (d == -1);
 		ok = ok && !s1_cmd_int(a, LEN(a), "deg", &d);
 	}
+	{	/* 2026-11-11 barcode map: {"cmd":"map","m":"FULR","seq":N} */
+		const char *mp = "{\"cmd\":\"map\",\"m\":\"qwab\",\"seq\":9}";
+		const char *md = "{\"cmd\":\"map\",\"m\":\"AABC\",\"seq\":9}";
+		const char *ms = "{\"cmd\":\"map\",\"m\":\"ABC\",\"seq\":9}";
+		char m[4] = {0};
+		ok = ok && (s1_cmd_parse(mp, LEN(mp), &c, &q) == S1_OK) && (c == S1_CMD_MAP) && (q == 9u);
+		ok = ok && s1_cmd_map(mp, LEN(mp), m) && (m[0] == 'Q') && (m[1] == 'W') && (m[2] == 'A') && (m[3] == 'B');
+		ok = ok && !s1_cmd_map(md, LEN(md), m) && !s1_cmd_map(ms, LEN(ms), m) && !s1_cmd_map(a, LEN(a), m);
+	}
 	return ok;
 }
 
@@ -92,6 +106,8 @@ bool s1_st_rules(void)
 	ok = ok && (s1_cmd_check(S1_CMD_STOP, S1_VC_INIT, true, &r) == S1_OK) && (r == S1_REMOTE_NONE);
 	ok = ok && (s1_cmd_check(S1_CMD_SERVO, S1_VC_READY, true, &r) == S1_OK) && (r == S1_REMOTE_NONE);
 	ok = ok && (s1_cmd_check(S1_CMD_SERVO, S1_VC_RUNNING, false, &r) == S1_REJ_STATE);
+	ok = ok && (s1_cmd_check(S1_CMD_MAP, S1_VC_READY, true, &r) == S1_OK) && (r == S1_REMOTE_NONE);
+	ok = ok && (s1_cmd_check(S1_CMD_MAP, S1_VC_RUNNING, false, &r) == S1_OK) && (r == S1_REMOTE_NONE);
 	return ok;
 }
 
@@ -133,7 +149,8 @@ bool s1_st_events(void)
 bool s1_st_small_buf(void)
 {
 	char b[64];
-	s1_snapshot_t s = busy();
+	static s1_snapshot_t s;	/* static: 1 KB initial-task stack in the TEST build */
+	s = busy();
 	return (s1_json_telemetry(b, sizeof b, &s) == 0u) &&
 	       (s1_json_heartbeat(b, 20, 1, 2, -50, 0, 0) == 0u) &&
 	       (s1_json_heartbeat(b, sizeof b, 1, 2, -50, 0, 0) > 0u);

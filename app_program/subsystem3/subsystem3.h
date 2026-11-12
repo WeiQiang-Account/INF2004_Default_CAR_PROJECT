@@ -9,7 +9,7 @@
  *	  IF-09  S3 -> S2  steering        steer_publish(corr) every 5 ms (motion_types.h, owned by S2)
  *	  IF-11  S3, S5 -> S2  GP7 edge branch via gpio_irq_register()  (drv_gpio_irq.h)
  *	  S3 -> VC         events          vc_post(VC_EV_MAKE(type, arg))  (vc_events.h, queue owned by S5)
- *	                     VC_EV_BARCODE  arg = valid<<2 | cmd  (0 A=left 1 B=right 2 C=straight 3 D=U-turn)
+ *	                     VC_EV_BARCODE  arg = valid<<7 | character read (A-Z ...; mapped by the VC)
  *	                     VC_EV_JUNCTION arg = line position + 100 (0..200)
  *	                     VC_EV_LINE_LOST / VC_EV_LINE_FOUND
  *	  S3 -> VC         hook            int s5_hook_line_detected(void)  (overrides S5's weak default)
@@ -41,7 +41,13 @@ UH	s3_ir_raw(INT sensor);		/* latest raw ADC, 0..4095. 0 = left, 1 = centre, 2 =
 INT	s3_line_position(void);		/* -100 (line far left) .. +100 (far right)  */
 BOOL	s3_line_ready(void);		/* calibration finished and OK               */
 BOOL	s3_line_lost(void);
-INT	s3_last_barcode_cmd(void);	/* -1 = none yet, else 0..3 (s3_cmd_t)       */
+INT	s3_last_barcode_cmd(void);	/* -1 = none yet, else the CHARACTER read    */
+INT	s3_barcode_progress(void);	/* elements read so far (0..29) while a barcode is being read, else 0 */
+INT	s3_barcode_fail_reason(void);
+INT	s3_barcode_fail_widths(UB *out, INT max, UB *mm10);	/* last failed read widths: 0.1 mm (*mm10=1) or ms; returns count */	/* last failed read: 1 count 2 ratio 3 no match 4 format 10 missed edge 11 too many 12 timeout */
+UW	s3_junction_count(void);	/* cross-junctions seen (all 3 sensors black) */
+BOOL	s3_adc_edge_pop(s3_edge_t *e);	/* barcode edges made from the analog value (S3_BC_FROM_ADC) */
+UW	s3_bar_edges(void);		/* GP7 edges so far (barcode sensor works?)   */
 UW	s3_barcode_errors(void);	/* failed barcode reads                      */
 UW	s3_barcode_count(void);		/* good barcode reads (increments per read)  */
 BOOL	s3_barcode_busy(void);		/* a barcode is being read                   */

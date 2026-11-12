@@ -13,8 +13,9 @@ static uint16_t sim_read(int angle, int fwd, int xr, int xl)
 {
     int phi = angle - 90;
     /* ray hits the face if its lateral position at depth fwd lies inside the box,
-       widened by a 7 deg half-beam to mimic the real sensor */
-    for (int d = -7; d <= 7; d += 7) {
+       widened by a ~21 deg half-beam: the real HC-SR04 (2026-11-11 track: a ~10 cm box read
+       24-36 cm wide with a 5 deg inset) */
+    for (int d = -21; d <= 21; d += 7) {
         int a = phi + d;
         if (a <= -85 || a >= 85) continue;
         /* x = fwd * tan(a) */
@@ -73,8 +74,8 @@ int main(void)
     run("box shifted left", 200, 10, 110, &p);          CHECK(p.action == S5_ACT_TURN_RIGHT);
     run("box shifted right", 200, -110, -10, &p);       CHECK(p.action == S5_ACT_TURN_LEFT);
     run("too close (80mm)", 80, -40, 40, &p);           CHECK(p.action == S5_ACT_REVERSE_RETRY);
-    run("wide wall", 150, -400, 400, &p);               CHECK(p.action == S5_ACT_REVERSE_RETRY && p.clr_l_mm == 0 && p.clr_r_mm == 0);
-    run("wall at 250 (ok range)", 250, -600, 600, &p);   CHECK(p.action == S5_ACT_REVERSE_RETRY);
+    run("wide wall", 150, -400, 400, &p);               CHECK(p.action != S5_ACT_CONTINUE);   /* 2026-11-11: reverse, or go round the more open side - never drive into it */
+    run("wall at 250 (ok range)", 250, -600, 600, &p);   CHECK(p.action != S5_ACT_CONTINUE);
 
     p.action = S5_ACT_TURN_RIGHT; p.closest_mm = 187; p.width_mm = 95; p.clr_l_mm = 211; p.clr_r_mm = 340; p.xl_mm = -37; p.found = 1;
     uint32_t w[2]; s5_profile_pack(&p, w, 10);

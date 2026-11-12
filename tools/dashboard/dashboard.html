@@ -86,12 +86,36 @@ canvas{width:100%;height:120px;display:block}
 #log .b{font-weight:600}
 #log .bad{color:var(--bad)} #log .ok{color:var(--ok)} #log .warn{color:var(--warn)}
 .hint{color:var(--muted);font-size:12px;margin-top:8px}
+.bctab{width:100%;border-collapse:collapse;font-size:13px}
+.bctab td{padding:5px 6px;border-top:1px solid var(--line)}
+.bctab td:first-child{font-weight:700;width:2.2em;text-align:center;font-size:15px}
+.bctab tr.on td{background:var(--okbg);color:var(--ok);font-weight:700}
+.span2{grid-column:span 2}
+@media (max-width:700px){.span2{grid-column:auto}}
+.mapin{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:6px}
+.mapin label{font-size:11px;color:var(--muted);display:flex;flex-direction:column;gap:2px}
+.mapin input{width:100%;text-align:center;font-size:18px;font-weight:700;text-transform:uppercase;padding:3px}
+.bigch{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums}
+.bcnow{display:flex;gap:14px;align-items:center;margin:4px 0 10px}
+.bcletter{width:84px;height:84px;border-radius:12px;border:2px solid var(--line);display:flex;align-items:center;justify-content:center;
+  font-size:56px;font-weight:800;line-height:1;transition:background .3s,border-color .3s;flex:none}
+.bcletter.fresh{background:var(--okbg);border-color:var(--ok);color:var(--ok)}
+.bcletter.reading{border-color:var(--accent)}
+.bcinfo{flex:1;min-width:0}
+.bcinfo .act{font-size:17px;font-weight:700}
+.bcprog{height:8px;background:var(--track);border-radius:4px;overflow:hidden;margin-top:6px}
+.barpic{display:flex;height:26px;border:1px solid var(--line);border-radius:4px;overflow:hidden;margin-top:4px;background:#fff}
+.barpic span{display:block;height:100%}
+.bcprog>span{display:block;height:100%;width:0;background:var(--accent);transition:width .15s}
+.ok-t{color:var(--ok)} .bad-t{color:var(--bad)} .warn-t{color:var(--warn)}
+.lostbar{height:8px;background:var(--track);border-radius:4px;overflow:hidden;margin:4px 0 2px}
+.lostbar>span{display:block;height:100%;width:0;background:var(--warn);transition:width .2s}
 .dim{opacity:.45}
 </style>
 </head>
 <body>
 <header>
-  <h1>SE14 Robot <span class="age">v12</span></h1>
+  <h1>SE14 Robot <span class="age">v18</span></h1>
   <div class="conn">
     <label for="host" class="age">Broker</label>
     <input id="host" value="10.142.246.70" aria-label="broker IP">
@@ -117,6 +141,42 @@ canvas{width:100%;height:120px;display:block}
         <div>IMU</div><div id="v_imu">-</div>
         <div>Last barcode</div><div id="v_bar">-</div>
       </div>
+    </section>
+
+    <section class="card span2">
+      <h2>Barcodes and junctions</h2>
+      <div class="bcnow">
+        <div class="bcletter" id="bc_big">–</div>
+        <div class="bcinfo">
+          <div class="lbl"><span>Current barcode</span><span id="bc_age"></span></div>
+          <div class="act" id="bc_bigact">nothing read yet</div>
+          <div class="lbl" style="margin-top:6px"><span id="bc_progtxt">not reading</span></div>
+          <div class="bcprog"><span id="bc_prog"></span></div>
+        </div>
+      </div>
+      <div class="mapin">
+        <label>Forward<input id="m_f" maxlength="1"></label>
+        <label>U-turn<input id="m_u" maxlength="1"></label>
+        <label>Left<input id="m_l" maxlength="1"></label>
+        <label>Right<input id="m_r" maxlength="1"></label>
+      </div>
+      <div class="btns"><button id="sendmap">Send mapping</button></div>
+      <div class="kv" style="margin-top:8px">
+        <div>Mapping on the robot</div><div id="v_map">-</div>
+        <div>Last barcode read</div><div id="v_bc_last">-</div>
+        <div>Stored for next junction</div><div id="v_bc_pend">-</div>
+        <div>Junctions seen / used</div><div id="v_junc">-</div>
+        <div>Last junction</div><div id="v_jlast">-</div>
+        <div>Barcode sensor edges (left)</div><div id="v_bc_edges">-</div>
+        <div>Reads OK / failed</div><div id="v_bc_cnt">-</div>
+        <div>Last failure</div><div id="v_bc_why">-</div>
+      </div>
+      <div class="lbl" style="margin-top:8px"><span>Last failed read, as the robot saw it (black = bar, white = gap)</span><span id="bc_failn"></span></div>
+      <div class="barpic" id="bc_failpic"></div>
+      <div class="hint" id="bc_failw" style="margin-top:2px"></div>
+      <div class="lbl" style="margin-top:8px"><span>Line (timer fills while lost, empties 2× faster on the line; full = FAULT)</span><span id="v_lost">-</span></div>
+      <div class="lostbar"><span id="b_lost"></span></div>
+      <div class="hint">Demo: the robot stores the character it reads, then does the mapped movement at the next cross-junction (not in the map / nothing stored = forward). The mapping must be sent before START. Barcodes are read by the <b>left</b> sensor (its analog value): drive so the barcode is on the robot's left. "Edges" should rise by about 30 for one barcode (29 bars and gaps); much fewer = bars merging (sensor too high / moving unevenly).</div>
     </section>
 
     <section class="card">
@@ -285,7 +345,27 @@ $("port").value = store.get("se14.port", $("port").value);
 
 const FAULTS = [[1,"Wheel stalled"],[2,"Encoder"],[4,"IMU lost"],[8,"Ultrasonic"],[16,"Wi-Fi"],[32,"Impact / tilt"]];
 const MCAUSE = { 1: "E-stop", 2: "stall", 3: "encoder", 4: "self-test" };
-const NAV = { LINE:"following the line", BARCODE_TURN:"turning at a barcode", OBSTACLE:"going around an obstacle", RECOVERY:"searching for the line" };
+const JA = { none:"forward (not in map)", forward:"forward", uturn:"U-turn", left:"turn left", right:"turn right" };
+const BCWHY = { 0:"-", 1:"wrong number of bars (moving too fast / partly missed)", 2:"wide and narrow bars look the same (sensor height / pot)",
+  3:"a character not in Code 39", 4:"no * start/stop or bad gap", 10:"missed an edge (sensor flicker)", 11:"too many bars", 12:"started but never finished" };
+function barPic(w){
+  const d = document.createElement("div"); d.className = "barpic";
+  const tot = w.reduce((a, b) => a + b, 0) || 1;
+  w.forEach((x, i) => { const s = document.createElement("span"); s.style.width = (x * 100 / tot) + "%"; s.style.background = (i % 2 === 0) ? "#111" : "#fff"; d.appendChild(s); });
+  return d;
+}
+function showFail(e){
+  if (!e.w) return;
+  const pic = barPic(e.w); pic.id = "bc_failpic"; $("bc_failpic").replaceWith(pic);
+  set("bc_failn", e.n + " of 29 bars/gaps");
+  const bars = e.w.filter((_, i) => i % 2 === 0), gaps = e.w.filter((_, i) => i % 2 === 1);
+  const mm = e.u === "mm10", f = x => mm ? (x / 10).toFixed(1) : String(x), un = mm ? " mm" : " ms";
+  const rng = a => a.length ? (f(Math.min(...a)) + "–" + f(Math.max(...a)) + un) : "-";
+  set("bc_failw", "bars " + rng(bars) + ", gaps " + rng(gaps) + ". A good read has 29, and wide ≈ 2–3× narrow for both. Widths (" + un.trim() + "): " + e.w.map(f).join(" "));
+}
+const chs = c => (c === undefined || c === "") ? "-" : (c === " " ? "space" : c);
+let lastEdges = null, lastBcOk = null, bcAt = 0;
+const NAV = { LINE:"following the line", BARCODE_TURN:"doing the junction move", OBSTACLE:"going around an obstacle", RECOVERY:"searching for the line" };
 const ACT = { continue:"continue", stop:"stop (blocked)", turn_left:"go around on the left", turn_right:"go around on the right", reverse:"reverse and retry" };
 const STATE_CLASS = { READY:"info", RUNNING:"ok", PAUSED:"warn", FAULT:"bad", COMPLETE:"ok", INIT:"" };
 
@@ -311,7 +391,36 @@ function onTelemetry(t){
   lastTel = t; telCount++;
   set("v_state", t.state); set("v_nav", (t.state === "RUNNING" || t.state === "PAUSED") ? (NAV[t.nav] ?? t.nav) : "-"); set("v_motion", (t.motion === "FAULT" && t.m_cause) ? ("FAULT: " + (MCAUSE[t.m_cause] ?? t.m_cause)) : t.motion);
   set("v_ircal", t.ir_cal === undefined ? "-" : (t.ir_cal ? "yes" : "NO - sweep over black and white"));
-  set("v_bar", t.bar === "none" ? "none yet" : t.bar);
+  if (t.map !== undefined){
+    const m = t.map;
+    set("v_bar", t.bar ? t.bar : "none yet");
+    $("v_map").textContent = m === "----" ? "NOT SET – send it" : ("F=" + m[0] + " U=" + m[1] + " L=" + m[2] + " R=" + m[3]);
+    $("v_map").className = m === "----" ? "bad-t" : "ok-t";
+    set("v_bc_last", t.bar ? (chs(t.bar) + " → " + (JA[t.bar_act] ?? t.bar_act)) : "none yet");
+    set("v_bc_pend", t.bar_p ? (chs(t.bar_p) + " → " + (JA[t.bar_act] ?? t.bar_act)) : "nothing (junction = forward)");
+    set("v_junc", t.junc_s + " / " + t.junc);
+    set("v_jlast", t.junc ? (chs(t.j_ch) + " → " + (JA[t.j_act] ?? t.j_act)) : "-");
+    const de = lastEdges === null ? 0 : t.bc_edges - lastEdges; lastEdges = t.bc_edges;
+    set("v_bc_edges", t.bc_edges + (de > 0 ? "  (+" + de + " now)" : ""));
+    set("v_bc_cnt", t.bc_ok + " / " + t.bc_err);
+    /* big "current barcode" tile: the letter, its movement, and the read in progress */
+    if (lastBcOk !== null && t.bc_ok !== lastBcOk) bcAt = Date.now();
+    lastBcOk = t.bc_ok;
+    set("bc_big", t.bar ? (t.bar === " " ? "␣" : t.bar) : "–");
+    set("bc_bigact", t.bar ? ("→ " + (JA[t.bar_act] ?? t.bar_act) + (t.bar_p ? "  (stored for the next junction)" : "")) : "nothing read yet");
+    const n = t.bc_n || 0;
+    $("bc_big").classList.toggle("fresh", Date.now() - bcAt < 2500);
+    $("bc_big").classList.toggle("reading", n > 0);
+    set("bc_progtxt", n > 0 ? ("reading… " + n + " / 29 bars and gaps") : "not reading");
+    $("bc_prog").style.width = (n * 100 / 29) + "%";
+    set("v_bc_why", t.bc_err ? (BCWHY[t.bc_why] ?? ("code " + t.bc_why)) : "-");
+    const lm = t.lost_ms || 0;
+    $("v_lost").textContent = (t.lost ? "LOST now" : "on the line") + (lm > 0 ? " · lost timer " + (lm / 1000).toFixed(1) + " / 3 s" : "");
+    $("v_lost").className = t.lost ? "bad-t" : (lm > 0 ? "warn-t" : "ok-t");
+    $("b_lost").style.width = Math.min(100, lm / 30) + "%";
+  } else {
+    set("v_bar", t.bar === "none" ? "none yet" : t.bar);
+  }
   set("v_spdl", t.spd_l); $("v_spdl").insertAdjacentHTML("beforeend", '<span class="unit">mm/s</span>');
   set("v_spdr", t.spd_r); $("v_spdr").insertAdjacentHTML("beforeend", '<span class="unit">mm/s</span>');
   $("b_l").style.width = Math.min(100, Math.abs(t.spd_l) / 5) + "%";
@@ -382,8 +491,11 @@ function onEvent(e){
     case "state": txt = "State " + e.from + " → " + e.to + (e.why ? ": " + e.why : "");
       cls = e.to === "FAULT" ? "bad b" : e.to === "RUNNING" ? "ok b" : "b"; break;
     case "fault": txt = "Fault flags now: " + (FAULTS.filter(([b]) => e.bits & b).map(f => f[1]).join(", ") || "none"); cls = e.bits ? "bad" : "ok"; break;
-    case "barcode": txt = "Barcode read: " + e.cmd; break;
-    case "barcode_error": txt = "Barcode read failed (" + e.count + " so far)"; cls = "warn"; break;
+    case "barcode": txt = e.ch !== undefined ? ("Barcode read: " + chs(e.ch) + " → stored, at the next junction: " + (JA[e.act] ?? e.act)) : ("Barcode read: " + e.cmd); cls = "ok"; break;
+    case "barcode_error": txt = "Barcode read failed (" + e.count + " so far)" + (e.why !== undefined ? ": " + (BCWHY[e.why] ?? e.why) : "") + (e.n !== undefined ? " – saw " + e.n + " of 29" : ""); cls = "warn"; showFail(e); break;
+    case "junction": txt = "Junction: barcode " + chs(e.ch) + " → " + (JA[e.act] ?? e.act); cls = "b"; break;
+    case "line_lost": txt = "Line lost for over 1 s (FAULT at 3 s)"; cls = "bad"; break;
+    case "line_found": txt = "Line found again"; cls = "ok"; break;
     case "hump": txt = "Hump: " + e.peak_mm + " mm high (highest " + e.max_mm + " mm)"; break;
     case "obstacle": txt = "Obstacle scan: " + (ACT[e.act] ?? e.act) + ", closest " + e.closest_cm + " cm, width " + e.w_cm + " cm"; cls = "warn"; break;
     case "imu": txt = "IMU " + e.state; cls = e.state === "ok" ? "ok" : e.state === "calibrating" ? "" : "bad"; break;
@@ -434,6 +546,21 @@ document.querySelectorAll("[data-cmd]").forEach(b => b.onclick = () => {
 });
 $("clearlog").onclick = () => { $("log").innerHTML = ""; };
 
+/* barcode map: 4 characters for Forward, U-turn, Left, Right -> {"cmd":"map","m":"FULR","seq":N} */
+const MAPIDS = ["m_f", "m_u", "m_l", "m_r"];
+MAPIDS.forEach((id, i) => { $(id).value = (store.get("se14.map", "") + "    ")[i].trim(); });
+$("sendmap").onclick = () => {
+  const m = MAPIDS.map(id => ($(id).value.trim().toUpperCase() || "-")).join("");
+  if (!/^[A-Z0-9-]{4}$/.test(m)){ set("cmdres", "Mapping: one letter (A-Z) or digit per box."); return; }
+  const used = m.replace(/-/g, "");
+  if (new Set(used).size !== used.length){ set("cmdres", "Mapping: each character only once."); return; }
+  if (!client){ set("cmdres", "Connect first."); return; }
+  store.set("se14.map", m.replace(/-/g, " "));
+  seq++;
+  client.publish("se14/robot/cmd", JSON.stringify({ cmd: "map", m: m, seq }));
+  set("cmdres", "Sent mapping F " + m[0] + " U " + m[1] + " L " + m[2] + " R " + m[3] + " (seq " + seq + ")");
+};
+
 function sendServo(deg){
   if (!client){ set("cmdres", "Connect first."); return; }
   seq++;
@@ -450,6 +577,7 @@ document.querySelectorAll("[data-sv]").forEach(b => b.onclick = () => {
 
 /* ------------------------------------------------------------------ once a second: freshness + rate */
 setInterval(() => {
+  if (bcAt){ const s = Math.round((Date.now() - bcAt) / 1000); set("bc_age", s < 60 ? "read " + s + " s ago" : "read " + Math.round(s / 60) + " min ago"); $("bc_big").classList.toggle("fresh", Date.now() - bcAt < 2500); }
   telRate = telCount; telCount = 0;
   set("v_rate", telRate + " per second" + (telRate ? "" : "  (none)"));
   const age = lastMsg ? (Date.now() - lastMsg) / 1000 : Infinity;

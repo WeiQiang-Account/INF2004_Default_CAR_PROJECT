@@ -6,19 +6,58 @@
  *	  - each character = 9 elements: bar, space, bar, space, ... bar
  *	  - exactly 3 of the 9 are WIDE, 6 are NARROW
  *	  - one narrow space (the gap) between characters
- *	  - our barcode is  * X *  (X = A..D)  ->  9 + 1 + 9 + 1 + 9 = 29 elements
+ *	  - our barcode is  * X *  (X = any Code 39 character except '*')  ->  9 + 1 + 9 + 1 + 9 = 29 elements
  */
 #include "s3_logic.h"
 
 /* 9-bit patterns, first element on the left, 1 = wide */
 typedef struct { uint16_t pattern; char ch; } code39_t;
 
-static const code39_t table[] = {
-    { 0x094, '*' },     /* 010010100 */
+static const code39_t table[] = {      /* full Code 39 set (2026-11-11: demo needs A-Z) */
+    { 0x034, '0' },     /* 000110100 */
+    { 0x121, '1' },     /* 100100001 */
+    { 0x061, '2' },     /* 001100001 */
+    { 0x160, '3' },     /* 101100000 */
+    { 0x031, '4' },     /* 000110001 */
+    { 0x130, '5' },     /* 100110000 */
+    { 0x070, '6' },     /* 001110000 */
+    { 0x025, '7' },     /* 000100101 */
+    { 0x124, '8' },     /* 100100100 */
+    { 0x064, '9' },     /* 001100100 */
     { 0x109, 'A' },     /* 100001001 */
     { 0x049, 'B' },     /* 001001001 */
     { 0x148, 'C' },     /* 101001000 */
-    { 0x019, 'D' }      /* 000011001 */
+    { 0x019, 'D' },     /* 000011001 */
+    { 0x118, 'E' },     /* 100011000 */
+    { 0x058, 'F' },     /* 001011000 */
+    { 0x00D, 'G' },     /* 000001101 */
+    { 0x10C, 'H' },     /* 100001100 */
+    { 0x04C, 'I' },     /* 001001100 */
+    { 0x01C, 'J' },     /* 000011100 */
+    { 0x103, 'K' },     /* 100000011 */
+    { 0x043, 'L' },     /* 001000011 */
+    { 0x142, 'M' },     /* 101000010 */
+    { 0x013, 'N' },     /* 000010011 */
+    { 0x112, 'O' },     /* 100010010 */
+    { 0x052, 'P' },     /* 001010010 */
+    { 0x007, 'Q' },     /* 000000111 */
+    { 0x106, 'R' },     /* 100000110 */
+    { 0x046, 'S' },     /* 001000110 */
+    { 0x016, 'T' },     /* 000010110 */
+    { 0x181, 'U' },     /* 110000001 */
+    { 0x0C1, 'V' },     /* 011000001 */
+    { 0x1C0, 'W' },     /* 111000000 */
+    { 0x091, 'X' },     /* 010010001 */
+    { 0x190, 'Y' },     /* 110010000 */
+    { 0x0D0, 'Z' },     /* 011010000 */
+    { 0x085, '-' },     /* 010000101 */
+    { 0x184, '.' },     /* 110000100 */
+    { 0x0C4, ' ' },     /* 011000100 */
+    { 0x094, '*' },     /* 010010100 */
+    { 0x0A8, '$' },     /* 010101000 */
+    { 0x0A2, '/' },     /* 010100010 */
+    { 0x08A, '+' },     /* 010001010 */
+    { 0x02A, '%' },     /* 000101010 */
 };
 #define TABLE_SIZE  ((int)(sizeof(table) / sizeof(table[0])))
 
@@ -73,9 +112,9 @@ static s3_dec_t decode_once(const uint32_t *w, char *out_char)
     /* 5. the two gaps (index 9 and 19) must be narrow spaces */
     if ((w[9] > thr_sp) || (w[19] > thr_sp)) return S3_DEC_ERR_FORMAT;
 
-    /* 6. must read  * X *  with X in A..D */
+    /* 6. must read  * X *  with X any character except the start/stop '*' */
     if ((chars[0] != '*') || (chars[2] != '*')) return S3_DEC_ERR_FORMAT;
-    if ((chars[1] < 'A') || (chars[1] > 'D'))   return S3_DEC_ERR_FORMAT;
+    if (chars[1] == '*')                        return S3_DEC_ERR_FORMAT;
 
     *out_char = chars[1];
     return S3_DEC_OK;
@@ -98,11 +137,13 @@ s3_dec_t s3_decode(const uint32_t *w, int n, char *out_char, s3_cmd_t *out_cmd)
     }
 
     *out_char = ch;
+    /* Legacy fixed meaning (old A-D course only). The robot now maps the CHARACTER to a
+       movement with the table sent over MQTT (vehicle_ctrl.c), not with this. */
     switch (ch) {
     case 'A': *out_cmd = S3_CMD_LEFT;     break;
     case 'B': *out_cmd = S3_CMD_RIGHT;    break;
-    case 'C': *out_cmd = S3_CMD_STRAIGHT; break;
-    default:  *out_cmd = S3_CMD_UTURN;    break;      /* 'D' */
+    case 'D': *out_cmd = S3_CMD_UTURN;    break;
+    default:  *out_cmd = S3_CMD_STRAIGHT; break;
     }
     return S3_DEC_OK;
 }

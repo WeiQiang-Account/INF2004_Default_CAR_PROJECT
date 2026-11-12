@@ -18,7 +18,8 @@
 enum { VC_INIT = 0, VC_READY, VC_RUNNING, VC_PAUSED, VC_FAULT, VC_COMPLETE };
 enum { NAV_LINE = 0, NAV_BARCODE, NAV_OBSTACLE, NAV_RECOVERY };
 enum { OA_IDLE = 0, OA_WAIT_STOP, OA_WAIT_PROFILE, OA_REVERSE,
-       B1_TURN, B2_LAT, B3_TURN, B4_FWD, B5_TURN, B6A_MOVE, B6B_SEEK, B6C_STOP, B7_ALIGN, BC_TURN };
+       B1_TURN, B2_LAT, B3_TURN, B4_FWD, B5_TURN, B6A_MOVE, B6B_SEEK, B6C_STOP, B7_ALIGN, BC_TURN,
+       JC_FWD, JC_TURN, JC_CLEAR };   /* junction: drive onto the crossing, turn / drive over it */
 enum { CAUSE_NONE = 0, CAUSE_INIT, CAUSE_IMPACT, CAUSE_LINE_LOST, CAUSE_TIMEOUT, CAUSE_SENSOR, CAUSE_RECOVERY, CAUSE_MOTION };
 
 EXPORT ID mbf_vc_events;
@@ -31,6 +32,7 @@ static struct {
     uint8_t  on_hump, degraded, cause, use_rescan;
     uint16_t hump_peak_mm;
     uint32_t t_state, t_step, t_seek, lost_since, found_since, rescan_at, buzz_off_at;
+    uint32_t lost_acc, lost_tick;  /* leaky line-lost timer (ms) and when it was last updated */
     int      lat_mm, fwd_mm;
     uint8_t  seek_hits, btn_start_cnt, btn_stop_cnt;
 } vc;
@@ -43,6 +45,37 @@ static void update_status(void)
 uint8_t  vc_status_byte(void)      { return g_status; }
 uint32_t vc_dropped_events(void)   { return g_dropped; }
 uint8_t  vc_fault_cause(void)      { return vc.cause; }   /* why the last FAULT happened (CAUSE_*) */
+
+/* ---------------------------------------------------------------- barcode map + junctions
+ * 2026-11-11 demo rules: a barcode character is STORED; at the next cross-junction the
+ * robot does the movement the MQTT map gives that character. Map order: F U L R. */
+static volatile char     g_map[4];             /* 0 = unset. Written by S1 (Wi-Fi task), read here */
+static volatile char     g_bc_pend;            /* stored character, 0 = none */
+static volatile uint16_t g_j_count;
+static volatile uint8_t  g_j_act;
+static volatile char     g_j_char;
+static uint32_t          g_j_ignore_until;
+static volatile uint16_t g_lost_ms;
+
+void s5_set_barcode_map(const char m[4])
+{
+    for (int i = 0; i < 4; i++) g_map[i] = (m[i] == '-') ? 0 : m[i];
+    S5_PRINT("[VC] barcode map: forward %c, U-turn %c, left %c, right %c\n",
+             g_map[0] ? g_map[0] : '-', g_map[1] ? g_map[1] : '-', g_map[2] ? g_map[2] : '-', g_map[3] ? g_map[3] : '-');
+}
+void s5_get_barcode_map(char m[4]) { for (int i = 0; i < 4; i++) m[i] = g_map[i] ? g_map[i] : '-'; }
+char s5_barcode_pending(void)      { return g_bc_pend; }
+uint8_t s5_barcode_action(char c)
+{
+    static const uint8_t act[4] = { S5_JA_FORWARD, S5_JA_UTURN, S5_JA_LEFT, S5_JA_RIGHT };
+    if (c == 0) return S5_JA_NONE;
+    for (int i = 0; i < 4; i++) if (g_map[i] == c) return act[i];
+    return S5_JA_NONE;                                /* not in the map: just go forward */
+}
+uint16_t s5_junction_count(void)     { return g_j_count; }
+uint8_t  s5_junction_last_act(void)  { return g_j_act; }
+char     s5_junction_last_char(void) { return g_j_char; }
+uint16_t s5_line_lost_ms(void)       { return g_lost_ms; }
 
 /* ---------------------------------------------------------------- posting API */
 int vc_post2(uint32_t w0, uint32_t w1)
@@ -76,7 +109,7 @@ static void enter_fault(int cause)
 {
     s5_motion_stop();
     s5_scan_request(S5_REQ_GUARD_OFF);
-    vc.cause = (uint8_t)cause; vc.step = OA_IDLE; vc.lost_since = 0; vc.found_since = 0; vc.rescan_at = 0;
+    vc.cause = (uint8_t)cause; vc.step = OA_IDLE; vc.lost_since = 0; vc.found_since = 0; vc.lost_acc = 0; vc.rescan_at = 0;
     to_state(VC_FAULT);
     buzz(1000);
     S5_PRINT("[VC] FAULT cause=%d\n", cause);
@@ -87,13 +120,13 @@ static void pause_mission(const char *why)
     vc.hist = vc.nav;                                /* shallow history (H) */
     s5_motion_stop();
     s5_scan_request(S5_REQ_GUARD_OFF);
-    vc.lost_since = 0; vc.found_since = 0; vc.rescan_at = 0;
+    vc.lost_since = 0; vc.found_since = 0; vc.lost_acc = 0; vc.rescan_at = 0;
     to_state(VC_PAUSED);
     buzz(300);
     S5_PRINT("[VC] PAUSED (%s), history nav=%d\n", why, vc.hist);
 }
 
-static void nav_to(int n) { if (n != vc.nav) { vc.lost_since = 0; vc.found_since = 0; } vc.nav = (uint8_t)n; update_status(); }   /* fresh line-lost timer per mode */
+static void nav_to(int n) { if (n != vc.nav) { vc.lost_since = 0; vc.found_since = 0; vc.lost_acc = 0; } vc.nav = (uint8_t)n; update_status(); }   /* fresh line-lost timer per mode */
 
 static void step_to(int s) { vc.step = (uint8_t)s; vc.t_step = now_ms(); }
 
@@ -127,9 +160,12 @@ static void issue_step(int s)
                    s5_motion_move(vc.fwd_mm);                  break;
     case B5_TURN:  s5_scan_request(S5_REQ_GUARD_OFF);
                    s5_motion_turn(-vc.side * 90);              break;
-    case B6A_MOVE: s5_motion_move(vc.lat_mm - S5_LINE_TOL_MM); break;
+    case B6A_MOVE: vc.seek_hits = 0; s5_motion_move(vc.lat_mm - S5_LINE_TOL_MM); break;
     case B7_ALIGN: s5_motion_turn( vc.side * 90);              break;
     case OA_REVERSE: s5_motion_move(-S5_REVERSE_MM);           break;
+    case JC_FWD:   s5_motion_move(S5_SENSOR_AXLE_MM);          break;   /* axle onto the crossing */
+    case JC_CLEAR: s5_motion_move(S5_JUNCTION_CLEAR_MM);       break;   /* straight over it */
+    case JC_TURN:  s5_motion_turn(g_j_act == S5_JA_LEFT ? 90 : g_j_act == S5_JA_RIGHT ? -90 : 180); break;
     default: break;
     }
 }
@@ -164,8 +200,28 @@ static void on_move_done(void)
     case B6C_STOP: issue_step(B7_ALIGN); break;     /* turn only after the stop is acknowledged */
     case B7_ALIGN: finish_bypass(); break;
     case BC_TURN:  nav_to(NAV_LINE); vc.step = OA_IDLE; cruise(); break;
+    case JC_FWD:   issue_step(JC_TURN); break;
+    case JC_TURN:
+    case JC_CLEAR:                                   /* junction done: back to line following */
+        g_j_ignore_until = now_ms() + S5_JUNCTION_IGNORE_MS;
+        nav_to(NAV_LINE); vc.step = OA_IDLE; cruise(); break;
     default: break;
     }
+}
+
+static void junction_begin(void)
+{
+    static const char *const nm[] = { "forward (nothing stored)", "forward", "U-turn", "left", "right" };
+    char c = g_bc_pend;
+    uint8_t a = s5_barcode_action(c);
+    g_bc_pend = 0;                                   /* used up */
+    g_j_char  = c;
+    g_j_act   = (a == S5_JA_NONE) ? S5_JA_FORWARD : a;
+    g_j_count++;
+    S5_PRINT("[VC] junction %u: barcode '%c' -> %s\n", (unsigned)g_j_count, c ? c : '-', nm[a < 5 ? a : 0]);
+    nav_to(NAV_BARCODE);
+    if (g_j_act == S5_JA_FORWARD) issue_step(JC_CLEAR);
+    else                          issue_step(JC_FWD);
 }
 
 static void on_profile(const uint32_t w[2])
@@ -201,7 +257,8 @@ static void start_run(void)
     s5_scan_request(S5_REQ_GUARD_OFF);                       /* fresh start: re-arm obstacle detection */
     s5_motion_reset();   /* 2026-11-07: an E-stop while READY (robot picked up / knocked) left S2 in
                             FAULT, which ignores DRIVE, so START did nothing. No-op if S2 is fine. */
-    to_state(VC_RUNNING); nav_to(NAV_LINE); vc.step = OA_IDLE; vc.lost_since = 0; vc.found_since = 0;
+    to_state(VC_RUNNING); nav_to(NAV_LINE); vc.step = OA_IDLE; vc.lost_since = 0; vc.found_since = 0; vc.lost_acc = 0;
+    g_bc_pend = 0; g_j_ignore_until = now_ms();                /* fresh run: nothing stored */
     cruise();
     S5_PRINT("[VC] RUNNING\n");
 }
@@ -255,14 +312,13 @@ static void on_event(const uint32_t w[2])
     if (vc.state != VC_RUNNING) return;              /* everything below only matters while running */
 
     switch (type) {
-    case VC_EV_BARCODE:
+    case VC_EV_BARCODE:                              /* 2026-11-11: store it; act at the next junction */
         if (vc.nav != NAV_LINE || !VC_BARCODE_VALID(arg)) break;     /* ignored during bypass */
-        switch (VC_BARCODE_CMD(arg)) {
-        case 0: nav_to(NAV_BARCODE); issue_step(BC_TURN); s5_motion_turn(90);  break;   /* A left   */
-        case 1: nav_to(NAV_BARCODE); issue_step(BC_TURN); s5_motion_turn(-90); break;   /* B right  */
-        case 3: nav_to(NAV_BARCODE); issue_step(BC_TURN); s5_motion_turn(180); break;   /* D U-turn */
-        default: break;                                                                 /* C straight */
-        }
+        g_bc_pend = VC_BARCODE_CHAR(arg);
+        S5_PRINT("[VC] barcode '%c' stored (map -> action %u)\n", g_bc_pend, (unsigned)s5_barcode_action(g_bc_pend));
+        break;
+    case VC_EV_JUNCTION:
+        if (vc.nav == NAV_LINE && vc.step == OA_IDLE && (int32_t)(now_ms() - g_j_ignore_until) >= 0) junction_begin();
         break;
     case VC_EV_LINE_LOST:  if (vc.nav == NAV_LINE && !vc.lost_since) vc.lost_since = now_ms(); break;
     case VC_EV_LINE_FOUND: if (s5_hook_line_lost() < 0) vc.lost_since = 0; break;   /* polled path decides (needs a steady line) */
@@ -320,7 +376,10 @@ static void tick(void)
                     if (el > S5_RECOVERY_TARGET_MS) S5_PRINT("[VC] NFR19 exceeded: %u ms\n", (unsigned)el);
                     s5_motion_clear_done(); s5_motion_stop(); step_to(B6C_STOP);
             } } else vc.seek_hits = 0;
-            if (vc.step == B6B_SEEK && (moved > 2 * S5_LINE_TOL_MM + 40 || el > S5_LINE_LOST_TMO_MS)) enter_fault(CAUSE_RECOVERY);
+            if (vc.step == B6B_SEEK && (moved > S5_SEEK_MAX_MM || el > S5_SEEK_MAX_MS)) enter_fault(CAUSE_RECOVERY);
+        } else if (vc.step == B6A_MOVE && s5_hook_line_detected() && ++vc.seek_hits >= 2) {
+            /* 2026-11-11: the line came up sooner than the (estimated) lateral distance: stop on it */
+            s5_motion_clear_done(); s5_motion_stop(); step_to(B6C_STOP);
         } else if (vc.step != OA_IDLE && vc.step != OA_WAIT_PROFILE) {
             if (s5_motion_wait_done(TMO_POL) == E_OK) on_move_done();
             else if (t - vc.t_step > S5_STEP_TMO_MS) enter_fault(CAUSE_TIMEOUT);
@@ -330,19 +389,17 @@ static void tick(void)
         if (vc.nav == NAV_LINE) {
             int lost = s5_hook_line_lost();
             if (lost >= 0) {
-                /* Line Follow reports its state directly: the timer runs for as long
-                   as the line is really lost and only resets when it is really found */
-                if (!lost) {                            /* only a STEADY line cancels it */
-                    if (vc.lost_since) {
-                        if (!vc.found_since) vc.found_since = t ? t : 1u;
-                        else if (t - vc.found_since >= S5_LINE_FOUND_MS) { vc.lost_since = 0; vc.found_since = 0; }
-                    }
-                }
-                else {
-                    vc.found_since = 0;
-                    if (!vc.lost_since) vc.lost_since = t ? t : 1u;
-                    else if (t - vc.lost_since > S5_LINE_LOST_TMO_MS) enter_fault(CAUSE_LINE_LOST);
-                }
+                /* 2026-11-11: LEAKY timer. Lost time adds up; time on the line takes it off
+                   twice as fast. The old "reset only after 1 s of steady line" kept counting
+                   during normal following (the line brushes the edge sensor on bends), so the
+                   dashboard bar only ever went up. Circling off the end of the line is mostly
+                   "lost", so it still reaches 3 s and FAULTs.                              */
+                uint32_t dt = vc.lost_tick ? (t - vc.lost_tick) : 0u;
+                if (dt > 100u) dt = 100u;                    /* after a pause / long gap */
+                if (lost) vc.lost_acc += dt;
+                else      vc.lost_acc = (vc.lost_acc > 2u * dt) ? (vc.lost_acc - 2u * dt) : 0u;
+                vc.lost_since = vc.lost_acc ? 1u : 0u;       /* keeps the event path quiet */
+                if (vc.lost_acc > S5_LINE_LOST_TMO_MS) enter_fault(CAUSE_LINE_LOST);
             } else if (vc.lost_since) {                 /* no Line Follow status: event-based */
                 if (s5_hook_line_detected()) vc.lost_since = 0;
                 else if (t - vc.lost_since > S5_LINE_LOST_TMO_MS) enter_fault(CAUSE_LINE_LOST);
@@ -351,6 +408,9 @@ static void tick(void)
         break;
     default: break;
     }
+    vc.lost_tick = t;
+    g_lost_ms = (vc.state == VC_RUNNING && vc.nav == NAV_LINE)
+              ? (uint16_t)((vc.lost_acc > 60000u) ? 60000u : vc.lost_acc) : 0u;
 }
 
 EXPORT void s5_vc_task(INT stacd, void *exinf)

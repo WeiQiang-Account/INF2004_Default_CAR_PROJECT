@@ -12,17 +12,17 @@ static void check(const char *id, bool ok, const char *what)
 
 int main(void)
 {
-	char b[512];
+	char b[1024];
 	s1_snapshot_t s = {0};
 	uint16_t n;
 
-	check("S1-U01", s1_st_telemetry(), "telemetry JSON: flat, design fields, longest case < 700 B");
+	check("S1-U01", s1_st_telemetry(), "telemetry JSON: flat, design fields, longest case < 960 B");
 	check("S1-U02", s1_st_parse(),     "command parser: good / unknown / missing seq / too long");
 	check("S1-U03", s1_st_rules(),     "state rules: start READY, resume+cancel PAUSED, reset FAULT+still, stop any");
 	check("S1-U04", s1_st_events(),    "events once each, watchdog reset first, cmd result");
 	check("S1-U05", s1_st_small_buf(), "too-small buffer gives 0, never half a JSON");
 
-	s.vc_state = S1_VC_RUNNING; s.obs_mm = 0xFFFFu; s.bar = -1;
+	s.vc_state = S1_VC_RUNNING; s.obs_mm = 0xFFFFu; s.bar = 0;
 	n = s1_json_telemetry(b, sizeof b, &s);
 	printf("example telemetry (%u bytes): %.*s\n", (unsigned)n, (int)n, b);
 	{

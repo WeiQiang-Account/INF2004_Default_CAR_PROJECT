@@ -90,28 +90,39 @@
                                       must keep the robot >= 100 mm away (NFR18) */
 #define S5_UNLATCH_MARGIN_MM 100  /* path counts as clear again beyond trigger + this ...      */
 #define S5_UNLATCH_PINGS    3     /* ... for this many pings in a row                          */
-#define S5_COARSE_CLEAR_MM  300   /* nothing nearer than this -> CONTINUE      */
+#define S5_COARSE_CLEAR_MM  400   /* nothing nearer than this -> CONTINUE. 2026-11-11: 300 -> 400: after a
+                                     reverse the box was "gone", the robot drove on, stopped, reversed ... */
 #define S5_TOO_CLOSE_MM     100   /* bypass guard / reverse threshold          */
 #define S5_EDGE_JUMP_MM     60    /* reading farther than closest+this = off the obstacle */
 #define S5_CLEAR_MAX_MM     500
 #define S5_MIN_WIDTH_MM     30
-#define S5_BEAM_INSET_DEG   5     /* beam ~15 deg wide: pull each edge inward  */
+#define S5_BEAM_INSET_DEG   20    /* the HC-SR04 sees a box ~20-25 deg beyond its edge: pull each edge in.
+                                     2026-11-11: with 5, a ~10 cm box read 24-36 cm wide -> "reverse and
+                                     retry" twice and a bypass so long it left the track.
+                                     MEASURE: dashboard "Obstacle width" vs the real box width */
 #define S5_MAX_RESCAN       3
 
 /* ---- Robot geometry (MEASURE) -------------------------------------------- */
 #define S5_ROBOT_WIDTH_MM   150
 #define S5_ROBOT_LENGTH_MM  180
 #define S5_SAFETY_MARGIN_MM 30
-#define S5_OBST_MIN_DEPTH_MM 100  /* ultrasound only sees the front face; depth = max(width, this) */
+#define S5_OBST_MIN_DEPTH_MM 100  /* ultrasound only sees the front face; depth = width, kept in */
+#define S5_OBST_MAX_DEPTH_MM 150  /* MIN..MAX (2026-11-11: an over-wide reading drove ~60 cm past the box) */
 #define S5_REVERSE_MM       100
+#define S5_BYPASS_EXTRA_MM  20    /* extra side clearance on the bypass (2026-11-11: "too close during bypass") */
+#define S5_BYPASS_LAT_MAX_MM 230  /* never step further sideways than this (a bad width must not leave the track) */
+#define S5_SIDE_BLOCKED_MM  60    /* a side counts as BLOCKED only below this clearance; otherwise the robot
+                                     goes round on the more open side instead of reversing (2026-11-11:
+                                     beam-widened readings made both sides look "too narrow" -> reverse loop) */
+#define S5_GUARD_TOO_CLOSE_MM 70  /* side guard while passing the box: pause only if nearer than this */
 
 /* ---- Vehicle Controller --------------------------------------------------- */
 #define S5_VC_TICK_MS       10
 #ifndef S5_INIT_TMO_MS
 #define S5_INIT_TMO_MS      20000 /* INIT -> FAULT if Motion or IMU not ready (IR calibration: waits, no FAULT) */
 #endif
-#define S5_CRUISE_MM_S      100   /* line-following speed. 2026-11-07: halved from 200 (less jolting on start/stop, fewer false IMU stops); raise later if needed */
-#define S5_CRUISE_DEGRADED_MM_S 100 /* after IMU_LOST (Tribunal: degrade, not E-stop) */
+#define S5_CRUISE_MM_S      80    /* line-following speed. 2026-11-07: halved from 200; 2026-11-11: 100 -> 80 (barcode + bends) */
+#define S5_CRUISE_DEGRADED_MM_S 80 /* after IMU_LOST (Tribunal: degrade, not E-stop) */
 #define S5_CREEP_MM_S       100
 #define S5_LINE_TOL_MM      40    /* line is accepted only within +/- this of the expected crossing */
 #define S5_LINE_LOST_TMO_MS 3000  /* system statechart                          */
@@ -122,6 +133,17 @@
                                      time, so it never stopped */
 #endif
 #define S5_RECOVERY_TARGET_MS 2000 /* NFR19 (logged, not fatal)                 */
+#define S5_SEEK_MAX_MM      250   /* after the bypass: creep this far past the expected line before giving up */
+#define S5_SEEK_MAX_MS      4000
+
+/* ---- Junctions (2026-11-11 demo: barcode character -> movement at the next cross-junction) */
+#ifndef S5_SENSOR_AXLE_MM
+#define S5_SENSOR_AXLE_MM   100   /* MEASURE: IR sensor bar to the wheel axle. Before a junction turn the
+                                     robot drives this far so it turns ON the crossing, not before it */
+#endif
+#define S5_JUNCTION_CLEAR_MM 60   /* "forward": drive straight this far over the crossing, ignoring the
+                                     side branches (they pulled the line follower off at the top right) */
+#define S5_JUNCTION_IGNORE_MS 1500 /* after a junction move, ignore new junction events this long */
 #define S5_PROFILE_TMO_MS   8000  /* VC waits this long for a scan result. 2026-11-06: 4000 was too short once the servo was slowed to 200 deg/s (a full coarse + fine scan took ~5 s -> step-timeout FAULT) */
 #define S5_STEP_TMO_MS      6000
 #define S5_BTN_DEBOUNCE     3     /* ticks                                      */

@@ -135,8 +135,8 @@ void mqtt_utk_on_connected(mqtt_client_t *client)
 /* ---------------------------------------------------------------- 200 ms tick */
 static void tick(void *arg)
 {
-	static char	buf[768];		/* static: the Wi-Fi task stack is small */
-	s1_snapshot_t	now, next;
+	static char	buf[1024];		/* static: the Wi-Fi task stack is small. 2026-11-11: 768 -> 1024 (barcode/junction fields) */
+	static s1_snapshot_t	now, next;	/* static: big (barcode widths), Wi-Fi task stack is small */
 	u16_t		n;
 	uint32_t	k;
 	(void)arg;

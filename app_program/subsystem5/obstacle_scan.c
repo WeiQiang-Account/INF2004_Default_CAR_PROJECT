@@ -133,7 +133,7 @@ static void guard_tick(void)
     uint16_t d;
     us_status_t st = us_ping(&d);
     if (note_status(st)) { enter_fault(); return; }
-    if (d != S5_DIST_NO_ECHO && d < S5_TOO_CLOSE_MM && !g_latched) {
+    if (d != S5_DIST_NO_ECHO && d < S5_GUARD_TOO_CLOSE_MM && !g_latched) {
         g_latched = 1;
         vc_post(VC_EV_MAKE(VC_EV_TOO_CLOSE, d));
     }

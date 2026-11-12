@@ -17,6 +17,7 @@ void s3_line_init(s3_line_t *l)
     l->lost           = false;
     l->black_count    = 0;
     l->junction_armed = true;
+    l->straight_count = 0;
 }
 
 void s3_line_cal_begin(s3_line_t *l)
@@ -60,12 +61,18 @@ static int16_t normalise(const s3_line_t *l, int i, uint16_t raw)
     return (int16_t)v;
 }
 
+int16_t s3_line_norm(const s3_line_t *l, int i, uint16_t raw) { return normalise(l, i, raw); }
+
 void s3_line_step(s3_line_t *l, const uint16_t raw[3], bool suppress_junction, s3_line_out_t *out)
 {
     int32_t sum, s;
 
     out->events = 0;
     for (int i = 0; i < 3; i++) out->norm[i] = normalise(l, i, raw[i]);
+    /* 2026-11-11: the barcodes lie BESIDE the line, under the barcode sensor. While one is
+       being read ('suppress_junction' = barcode busy) and the centre is on the line, the
+       bars are not the line: ignore that sensor so the robot does not swerve onto them. */
+    if (suppress_junction && (out->norm[1] > S3_BLACK_THRESHOLD)) out->norm[S3_BC_SENSOR_IDX] = 0;
     sum = (int32_t)out->norm[0] + out->norm[1] + out->norm[2];
     {
         int16_t mx = out->norm[0];
@@ -121,11 +128,17 @@ void s3_line_step(s3_line_t *l, const uint16_t raw[3], bool suppress_junction, s
         if (l->black_count < 255) l->black_count++;
         if ((l->black_count >= S3_JUNCTION_SAMPLES) && l->junction_armed) {
             l->junction_armed = false;
-            if (!suppress_junction) out->events |= S3_LINE_EVT_JUNCTION;
+            /* only when it came in straight: on a bend the line crosses all three diagonally */
+            if (!suppress_junction && (l->straight_count >= S3_JUNC_STRAIGHT_SAMPLES)) out->events |= S3_LINE_EVT_JUNCTION;
         }
     } else {
         l->black_count = 0;
         l->junction_armed = true;
+        if (!l->lost && (l->last_pos <= S3_JUNC_STRAIGHT_POS) && (l->last_pos >= -S3_JUNC_STRAIGHT_POS)) {
+            if (l->straight_count < 255) l->straight_count++;
+        } else {
+            l->straight_count = 0;
+        }
     }
 
     out->pos          = l->last_pos;           /* held while the line is lost */

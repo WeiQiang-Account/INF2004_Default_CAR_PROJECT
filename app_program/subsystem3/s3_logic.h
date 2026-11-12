@@ -27,11 +27,12 @@ typedef enum {
     S3_DEC_ERR_COUNT,           /* not exactly 29 elements                   */
     S3_DEC_ERR_RATIO,           /* wide is not clearly wider than narrow     */
     S3_DEC_ERR_NO_MATCH,        /* 9-element pattern not in the table        */
-    S3_DEC_ERR_FORMAT           /* not * X * with X in A-D, or gaps not narrow */
+    S3_DEC_ERR_FORMAT           /* not * X *, or gaps not narrow             */
 } s3_dec_t;
 
 /* w[] = 29 element widths, first one is a BAR, then a space, a bar, ...
- * On S3_DEC_OK: *out_char = 'A'..'D', *out_cmd = matching command.
+ * On S3_DEC_OK: *out_char = the character (A-Z, 0-9, - . space $ / + %),
+ * *out_cmd = legacy A-D meaning (others STRAIGHT; the real mapping comes over MQTT).
  * Also tries the widths reversed (robot read the code backwards).            */
 s3_dec_t s3_decode(const uint32_t *w, int n, char *out_char, s3_cmd_t *out_cmd);
 
@@ -51,6 +52,7 @@ typedef struct {
     bool     lost;
     uint8_t  black_count;
     bool     junction_armed;    /* one junction = ONE event                  */
+    uint8_t  straight_count;    /* samples in a row going straight (junction needs it) */
 } s3_line_t;
 
 typedef struct {
@@ -69,6 +71,8 @@ void s3_line_cal_feed(s3_line_t *l, const uint16_t raw[3]);
 bool s3_line_cal_end(s3_line_t *l);          /* false if any sensor range < S3_MIN_CAL_RANGE */
 /* One 5 ms step. 'suppress_junction' = true while a barcode is being read
  * (a wide bar looks black under all three sensors).                           */
+/* one sensor scaled to 0..1000 (1000 = black) with the line calibration */
+int16_t s3_line_norm(const s3_line_t *l, int i, uint16_t raw);
 void s3_line_step(s3_line_t *l, const uint16_t raw[3], bool suppress_junction, s3_line_out_t *out);
 
 /* ============================ Barcode state machine ======================== */
@@ -77,7 +81,7 @@ typedef enum { S3_BC_WAITING = 0, S3_BC_READING, S3_BC_COOLDOWN } s3_bc_state_t;
 typedef enum { S3_BC_EV_NONE = 0, S3_BC_EV_CMD, S3_BC_EV_ERROR } s3_bc_evtype_t;
 typedef struct {
     s3_bc_evtype_t type;
-    int            value;       /* CMD: s3_cmd_t.  ERROR: reason, see below */
+    int            value;       /* CMD: the CHARACTER read ('A'..'Z' ...).  ERROR: reason, see below */
 } s3_bc_ev_t;
 
 /* ERROR reasons: 1..4 = s3_dec_t (1 count, 2 ratio, 3 no match, 4 format)
@@ -94,10 +98,14 @@ typedef struct {
     bool          have_pend;
     uint32_t      widths[S3_BC_ELEMENTS];
     int           n_elem;
-    uint32_t      max_us;                     /* widest element so far         */
+    uint32_t      max_us;                     /* widest element so far (same unit as widths) */
+    uint32_t      widths_t[S3_BC_ELEMENTS];   /* element durations, us (always)        */
+    uint32_t      max_t_us;                   /* longest element in TIME (timeouts)    */
+    bool          use_enc;                    /* widths from wheel distance, not time  */
+    bool          fail_enc;                   /* last failed read used distance widths */
     uint32_t      cooldown_until;
     uint32_t      errors;
-    int           last_cmd;                   /* -1 = nothing decoded yet      */
+    int           last_cmd;                   /* last character read, -1 = nothing yet */
     uint32_t      fail_widths[S3_BC_ELEMENTS];/* widths of the last failed read */
     int           fail_n;
     int           fail_reason;

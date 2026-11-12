@@ -15,11 +15,59 @@
 #include "drv_ir.h"
 #include "../subsystem2/motion_types.h"		/* steer_publish() */
 #include "../subsystem5/vc_events.h"		/* vc_post(), VC_EV_* */
+#include "../subsystem2/drv_encoder.h"		/* encoder_read(): barcode widths by distance */
 
 LOCAL s3_line_t		line;
 LOCAL volatile UH	raw_now[3];
 LOCAL volatile H	pos_now;
 LOCAL volatile UB	ready_flag, any_black_flag, lost_flag;
+LOCAL volatile UW	junc_count;
+UW   s3_junction_count(void) { return junc_count; }
+/* ---- barcode from the ANALOG value (S3_BC_FROM_ADC): this task (5 ms) turns the barcode
+   sensor's reading into clean edges with hysteresis and hands them to the Barcode task.
+   One producer (this task), one consumer (Barcode task): a small ring, head moved last. */
+#define BC_RING 64u
+LOCAL s3_edge_t		bc_ring[BC_RING];
+LOCAL volatile UW	bc_head, bc_tail, bc_edges;
+LOCAL UB		bc_lvl;				/* 1 = over a bar now */
+#define S3_MB()		__asm volatile("dmb" ::: "memory")
+BOOL s3_adc_edge_pop(s3_edge_t *e)
+{
+	UW t = bc_tail;
+	if (t == bc_head) return FALSE;
+	S3_MB();
+	*e = bc_ring[t & (BC_RING - 1u)];
+	S3_MB();
+	bc_tail = t + 1u;
+	return TRUE;
+}
+LOCAL int16_t		bc_ext;				/* peak while over a bar, low while over white */
+LOCAL void bc_adc_step(int16_t v)
+{
+	/* peak/valley follower: catches thin bars and thin gaps that never reach a fixed threshold */
+	UB lv = bc_lvl;
+	if (bc_lvl == 0u) {
+		if (v < bc_ext) bc_ext = v;				/* follow the white low */
+		if ((v > bc_ext + S3_BC_ADC_SWING) && (v > S3_BC_ADC_MIN_BLACK)) { lv = 1u; bc_ext = v; }
+	} else {
+		if (v > bc_ext) bc_ext = v;				/* follow the bar peak */
+		if (v < bc_ext - S3_BC_ADC_SWING) { lv = 0u; bc_ext = v; }
+	}
+	if (lv != bc_lvl) {
+		UW h = bc_head;
+		bc_lvl = lv;
+		bc_edges++;
+		if ((UW)(h - bc_tail) < BC_RING) {
+			bc_ring[h & (BC_RING - 1u)].t_us  = ir_time_us();
+			{ int32_t l, r; encoder_read(&l, &r); bc_ring[h & (BC_RING - 1u)].enc = (l + r) / 2; }	/* distance widths */
+			bc_ring[h & (BC_RING - 1u)].level = (uint8_t)(lv ? S3_BAR_LEVEL_BLACK : !S3_BAR_LEVEL_BLACK);
+			S3_MB();
+			bc_head = h + 1u;
+			(void)tk_set_flg(flg_bar_edge, FLG_S3_EDGE);
+		}
+	}
+}
+UW   s3_bar_edges(void)      { return S3_BC_FROM_ADC ? bc_edges : ir_edge_count(); }
 
 UH   s3_ir_raw(INT s)      { return raw_now[(s < 0 || s > 2) ? 0 : s]; }
 INT  s3_line_position(void) { return pos_now; }
@@ -119,6 +167,9 @@ EXPORT void line_follow_task(INT stacd, void *exinf)
 		if (ir_adc_read3(raw)) {
 			INT i;
 			for (i = 0; i < 3; i++) raw_now[i] = raw[i];
+#if S3_BC_FROM_ADC
+			bc_adc_step(s3_line_norm(&line, S3_BC_SENSOR_IDX, raw[S3_BC_SENSOR_IDX]));
+#endif
 			s3_line_step(&line, raw, s3_barcode_busy(), &out);
 			pos_now        = out.pos;
 			lost_flag      = out.lost ? 1 : 0;
@@ -127,6 +178,7 @@ EXPORT void line_follow_task(INT stacd, void *exinf)
 			steer_publish((int8_t)out.steer);		/* IF-09: one 16-bit store, seq + correction */
 
 			if ((out.events & S3_LINE_EVT_JUNCTION) != 0u) {
+				junc_count++;
 				(void)vc_post(VC_EV_MAKE(VC_EV_JUNCTION, (uint32_t)(out.pos + 100)));
 #if S3_VERBOSE
 				S3_PRINT("[S3] junction, line pos %d\n", (INT)out.pos);

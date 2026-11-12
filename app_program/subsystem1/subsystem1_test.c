@@ -26,13 +26,13 @@ EXPORT void subsystem1_test(void)
 {
 	char		reply[112];
 	static s1_snapshot_t snap;	/* static: 1 KB initial-task stack */
-	static char	big[768];
+	static char	big[1024];
 	UW		a0, r0;
 
 	TEST_INIT();
 
 	/* ---- pure logic (the same code the PC test checks) ---- */
-	TEST_CHECK("S1-U01", s1_st_telemetry(), "telemetry JSON: flat, design fields, < 700 B");
+	TEST_CHECK("S1-U01", s1_st_telemetry(), "telemetry JSON: flat, design fields, < 960 B");
 	TEST_CHECK("S1-U02", s1_st_parse(),     "command parser: good / unknown / missing seq / too long");
 	TEST_CHECK("S1-U03", s1_st_rules(),     "state rules for start / stop / resume / cancel / reset");
 	TEST_CHECK("S1-U04", s1_st_events(),    "events reported once, watchdog reset first");

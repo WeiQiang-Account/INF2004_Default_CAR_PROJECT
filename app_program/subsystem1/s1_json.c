@@ -56,10 +56,19 @@ static const char *nav_name(uint8_t v)
 	static const char *const n[] = { "LINE", "BARCODE_TURN", "OBSTACLE", "RECOVERY" };
 	return (v < 4u) ? n[v] : "?";
 }
-static const char *bar_name(int8_t b)
+static void put_ch(w_t *w, char c)            /* one character as a JSON string body */
 {
-	static const char *const n[] = { "left", "right", "straight", "uturn" };
-	return ((b >= 0) && (b < 4)) ? n[b] : "none";
+	if ((c == '"') || (c == '\\')) { put_c(w, '\\'); }
+	put_c(w, c);
+}
+static void kv_ch(w_t *w, const char *k, char c)   /* "k":"X" or "k":"" */
+{
+	key(w, k); put_c(w, '"'); if ((c >= ' ') && (c <= '~')) { put_ch(w, c); } put_c(w, '"');
+}
+const char *s1_act_name(uint8_t a)
+{
+	static const char *const n[] = { "none", "forward", "uturn", "left", "right" };
+	return (a < 5u) ? n[a] : "?";
 }
 static const char *act_name(uint8_t a)
 {
@@ -78,8 +87,8 @@ static const char *motion_name(uint8_t m)
 }
 const char *s1_cmd_name(s1_cmd_t c)
 {
-	static const char *const n[] = { "none", "start", "stop", "resume", "cancel", "reset", "servo" };
-	return ((unsigned)c < 7u) ? n[c] : "?";
+	static const char *const n[] = { "none", "start", "stop", "resume", "cancel", "reset", "servo", "map" };
+	return ((unsigned)c < 8u) ? n[c] : "?";
 }
 const char *s1_rej_name(s1_rej_t r)
 {
@@ -108,7 +117,21 @@ uint16_t s1_json_telemetry(char *buf, uint16_t size, const s1_snapshot_t *s)
 	kv_i(&w, "line", s->line);
 	key(&w, "ir");
 	put_c(&w, '['); put_u(&w, s->ir[0]); put_c(&w, ','); put_u(&w, s->ir[1]); put_c(&w, ','); put_u(&w, s->ir[2]); put_c(&w, ']');
-	kv_s(&w, "bar", bar_name(s->bar));
+	kv_ch(&w, "bar", s->bar);                   /* last barcode character, "" none     */
+	kv_ch(&w, "bar_p", s->bar_pend);            /* stored for the next junction        */
+	kv_s(&w, "bar_act", s1_act_name(s->bar_act));
+	key(&w, "map"); put_c(&w, '"'); { int i; for (i = 0; i < 4; i++) { put_ch(&w, s->map[i] ? s->map[i] : '-'); } } put_c(&w, '"');
+	kv_u(&w, "bc_edges", s->bar_edges);
+	kv_u(&w, "bc_ok", s->bar_count);
+	kv_u(&w, "bc_err", s->bar_err);
+	kv_u(&w, "bc_why", s->bar_why);
+	kv_u(&w, "bc_n", s->bar_n);                 /* reading now: bars/gaps so far of 29 */
+	kv_u(&w, "junc_s", s->junc_seen);
+	kv_u(&w, "junc", s->junc);
+	kv_s(&w, "j_act", s1_act_name(s->j_act));
+	kv_ch(&w, "j_ch", s->j_ch);
+	kv_b(&w, "lost", s->line_lost != 0u);
+	kv_u(&w, "lost_ms", s->lost_ms);
 	kv_u(&w, "hump_mm", s->hump_mm);
 	kv_u(&w, "hump_max_mm", s->hump_max_mm);
 	kv_i(&w, "pitch", s->pitch_x10);               /* 0.1 deg */
@@ -188,12 +211,27 @@ uint16_t s1_json_next_event(char *buf, uint16_t size, const s1_snapshot_t *s, s1
 		seen->faults = s->faults;
 	} else if (s->bar_count != seen->bar_count) {
 		kv_s(&w, "ev", "barcode");
-		kv_s(&w, "cmd", bar_name(s->bar));
+		kv_ch(&w, "ch", s->bar);
+		kv_s(&w, "act", s1_act_name(s->bar_act));     /* what it will do at the next junction */
 		seen->bar_count = s->bar_count;
 	} else if (s->bar_err != seen->bar_err) {
 		kv_s(&w, "ev", "barcode_error");
 		kv_u(&w, "count", s->bar_err);
+		kv_u(&w, "why", s->bar_why);
+		kv_u(&w, "n", s->bar_fail_n);
+		kv_s(&w, "u", s->bar_fail_mm10 ? "mm10" : "ms");
+		key(&w, "w"); put_c(&w, '[');                  /* widths in ms: bar, gap, bar ... */
+		{ unsigned i; for (i = 0; (i < s->bar_fail_n) && (i < 29u); i++) { if (i > 0u) { put_c(&w, ','); } put_u(&w, s->bar_fail_w[i]); } }
+		put_c(&w, ']');
 		seen->bar_err = s->bar_err;
+	} else if (s->junc != seen->junc) {
+		kv_s(&w, "ev", "junction");
+		kv_ch(&w, "ch", s->j_ch);
+		kv_s(&w, "act", s1_act_name(s->j_act));
+		seen->junc = s->junc;
+	} else if ((s->lost_ms >= 1000u) != (seen->lost_ms >= 1000u)) {
+		kv_s(&w, "ev", (s->lost_ms >= 1000u) ? "line_lost" : "line_found");
+		seen->lost_ms = s->lost_ms;
 	} else if (s->humps != seen->humps) {
 		kv_s(&w, "ev", "hump");
 		kv_u(&w, "peak_mm", s->hump_last_mm);
@@ -240,7 +278,7 @@ const char *s1_fault_why(const s1_snapshot_t *s)
 
 uint16_t s1_status_text(char *buf, uint16_t size, const s1_snapshot_t *s)
 {
-	static const char *const navs[] = { "following the line", "turning at a barcode",
+	static const char *const navs[] = { "following the line", "junction move",
 					    "going around an obstacle", "searching for the line" };
 	w_t w;
 	w.b = buf; w.n = 0; w.size = size; w.ok = (size > 1u);
@@ -260,6 +298,8 @@ uint16_t s1_status_text(char *buf, uint16_t size, const s1_snapshot_t *s)
 		put_s(&w, ", wheels L "); put_i(&w, s->spd_l); put_s(&w, " R "); put_i(&w, s->spd_r);
 		put_s(&w, " mm/s, line "); put_i(&w, s->line);
 		if (s->line_lost) { put_s(&w, " (LOST)"); }
+		if (s->lost_ms >= 500u) { put_s(&w, " | line lost "); put_u(&w, s->lost_ms / 100u / 10u); put_c(&w, '.'); put_u(&w, (s->lost_ms / 100u) % 10u); put_s(&w, " s (FAULT at 3 s)"); }
+		if (s->bar_pend != 0) { put_s(&w, " | barcode "); put_ch(&w, s->bar_pend); put_s(&w, " stored -> "); put_s(&w, (s->bar_act != 0u) ? s1_act_name(s->bar_act) : "forward (not in the map)"); put_s(&w, " at the next junction"); }
 		break;
 	case S1_VC_PAUSED:
 		put_s(&w, "PAUSED: press START to resume, STOP to cancel");
@@ -317,7 +357,7 @@ s1_rej_t s1_cmd_parse(const char *p, uint16_t len, s1_cmd_t *cmd, uint32_t *seq)
 	uint16_t n;
 	uint32_t v = 0;
 	bool digit = false;
-	static const char *const names[] = { "start", "stop", "resume", "cancel", "reset", "servo" };
+	static const char *const names[] = { "start", "stop", "resume", "cancel", "reset", "servo", "map" };
 	unsigned c;
 
 	*cmd = S1_CMD_NONE;
@@ -343,7 +383,7 @@ s1_rej_t s1_cmd_parse(const char *p, uint16_t len, s1_cmd_t *cmd, uint32_t *seq)
 
 	{
 		int k = find_key(p, len, "cmd") + 1;                  /* first character of the word */
-		for (c = 0; c < 6u; c++) {
+		for (c = 0; c < 7u; c++) {
 			if (word_is(&p[k], n, names[c])) {
 				*cmd = (s1_cmd_t)(c + 1u);
 				*seq = v;
@@ -371,6 +411,24 @@ bool s1_cmd_int(const char *p, uint16_t len, const char *key, int32_t *v)
 	}
 	if (!digit) { return false; }
 	*v = neg ? -x : x;
+	return true;
+}
+
+bool s1_cmd_map(const char *p, uint16_t len, char m[4])
+{
+	int i = find_key(p, len, "m"), k, j;
+	char t[4];
+	if ((i < 0) || ((i + 5) >= (int)len) || (p[i] != '"') || (p[i + 5] != '"')) { return false; }
+	for (k = 0; k < 4; k++) {
+		char c = p[i + 1 + k];
+		if ((c >= 'a') && (c <= 'z')) { c = (char)(c - 'a' + 'A'); }
+		if (!(((c >= 'A') && (c <= 'Z')) || ((c >= '0') && (c <= '9')) || (c == '-'))) { return false; }
+		t[k] = c;
+	}
+	for (k = 0; k < 4; k++) {                      /* one character = one movement */
+		for (j = k + 1; j < 4; j++) { if ((t[k] != '-') && (t[k] == t[j])) { return false; } }
+	}
+	for (k = 0; k < 4; k++) { m[k] = t[k]; }
 	return true;
 }
 
@@ -402,6 +460,10 @@ s1_rej_t s1_cmd_check(s1_cmd_t cmd, uint8_t st, bool still, uint8_t *remote)
 	case S1_CMD_SERVO:
 		/* test tool only: the scan needs the servo while the robot drives */
 		if (st == S1_VC_RUNNING) { return S1_REJ_STATE; }
+		break;
+	case S1_CMD_MAP:
+		/* allowed in any state except while driving through a junction would be odd but harmless:
+		   the new map is used from the next junction on */
 		break;
 	case S1_CMD_NONE:
 	default:

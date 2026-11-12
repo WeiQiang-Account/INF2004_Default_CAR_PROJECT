@@ -26,8 +26,8 @@ EXPORT void subsystem3_test(void)
 	TEST_INIT();
 
 	/* ---- pure logic (the same code the PC test checks) ---- */
-	TEST_CHECK("S3-U01", s3_st_decode_fwd(),    "barcodes A-D decode to the right command (15 % noise)");
-	TEST_CHECK("S3-U02", s3_st_decode_rev(),    "barcodes read backwards decode the same");
+	TEST_CHECK("S3-U01", s3_st_decode_fwd(),    "barcodes A-Z (all 43 Code 39 chars) decode right (15 % noise)");
+	TEST_CHECK("S3-U02", s3_st_decode_rev(),    "barcodes read backwards decode the same character");
 	TEST_CHECK("S3-U03", s3_st_decode_reject(), "28 elements / flat widths / damaged code are rejected");
 	TEST_CHECK("S3-U04", s3_st_line_steer(),    "line position, steering sign, calibration range check");
 	TEST_CHECK("S3-U05", s3_st_line_events(),   "line lost in 8 samples (40 ms), found, junction once, no junction during a barcode");

@@ -18,6 +18,9 @@ void s3_bc_init(s3_bc_t *b)
     b->have_pend      = false;
     b->n_elem         = 0;
     b->max_us         = 0;
+    b->max_t_us       = 0;
+    b->use_enc        = false;
+    b->fail_enc       = false;
     b->cooldown_until = 0;
     b->errors         = 0;
     b->last_cmd       = -1;
@@ -37,7 +40,8 @@ static void fail(s3_bc_t *b, int reason, s3_bc_ev_t *ev)
     b->errors++;
     b->fail_reason = reason;
     b->fail_n = b->n_elem;
-    for (int i = 0; i < b->n_elem && i < S3_BC_ELEMENTS; i++) b->fail_widths[i] = b->widths[i];
+    b->fail_enc = b->use_enc;
+    for (int i = 0; i < b->n_elem && i < S3_BC_ELEMENTS; i++) b->fail_widths[i] = b->use_enc ? b->widths[i] : b->widths_t[i];
     ev->type  = S3_BC_EV_ERROR;
     ev->value = reason;
 }
@@ -47,12 +51,19 @@ static void try_decode(s3_bc_t *b, uint32_t t_us, s3_bc_ev_t *ev)
 {
     char     ch = 0;
     s3_cmd_t cmd = S3_CMD_STRAIGHT;
-    s3_dec_t r = s3_decode(b->widths, b->n_elem, &ch, &cmd);
+    const uint32_t *w = b->widths_t;
+    if (b->use_enc) {                               /* distance widths, if the wheels really moved */
+        uint32_t span = 0;
+        for (int i = 0; i < b->n_elem; i++) span += b->widths[i];
+        if (span >= S3_BC_MIN_ENC_SPAN) w = b->widths;
+    }
+    s3_dec_t r = s3_decode(w, b->n_elem, &ch, &cmd);
 
     if (r == S3_DEC_OK) {
-        b->last_cmd       = (int)cmd;
+        (void)cmd;                                    /* the character is what counts now */
+        b->last_cmd       = (int)(unsigned char)ch;
         ev->type          = S3_BC_EV_CMD;
-        ev->value         = (int)cmd;
+        ev->value         = (int)(unsigned char)ch;
         b->state          = S3_BC_COOLDOWN;           /* never read the same barcode twice */
         b->cooldown_until = t_us + S3_COOLDOWN_US;
     } else {
@@ -73,6 +84,7 @@ static void handle_edge(s3_bc_t *b, const s3_edge_t *e, s3_bc_ev_t *ev)
         if (e->level == S3_BAR_LEVEL_BLACK) {       /* first black edge = start of the code */
             b->n_elem = 0;
             b->max_us = 0;
+            b->max_t_us = 0;
             b->prev   = *e;
             b->state  = S3_BC_READING;
         }
@@ -85,8 +97,12 @@ static void handle_edge(s3_bc_t *b, const s3_edge_t *e, s3_bc_ev_t *ev)
 
     {
         uint32_t t = e->t_us - b->prev.t_us;
-        b->widths[b->n_elem++] = t;               /* width from time (e->enc is kept for a later speed correction) */
-        if (t > b->max_us) b->max_us = t;
+        int32_t  d = e->enc - b->prev.enc;
+        uint32_t w = b->use_enc ? (uint32_t)((d < 0) ? -d : d) : t;   /* distance (counts) or time (us) */
+        b->widths_t[b->n_elem] = t;
+        b->widths[b->n_elem++] = w;
+        if (w > b->max_us) b->max_us = w;
+        if (t > b->max_t_us) b->max_t_us = t;
     }
     b->prev = *e;
 
@@ -130,7 +146,7 @@ void s3_bc_poll(s3_bc_t *b, uint32_t now_us, s3_bc_ev_t *ev)
 
         if (b->n_elem >= S3_BC_ELEMENTS) {
             /* got all 29: wait for the quiet zone (a white gap > 3x the widest element) */
-            if (gap > 3u * b->max_us) {
+            if (gap > 3u * b->max_t_us) {
                 try_decode(b, now_us, ev);
             } else if (gap > 10u * (uint32_t)S3_ABORT_US) {
                 fail(b, S3_BC_ERR_TIMEOUT, ev);
@@ -138,8 +154,9 @@ void s3_bc_poll(s3_bc_t *b, uint32_t now_us, s3_bc_ev_t *ev)
         } else {
             /* still collecting: give up only after a gap that is long compared with the
              * widest element so far (or S3_ABORT_US, whichever is bigger) */
-            uint32_t limit = 4u * b->max_us;
-            if (limit < (uint32_t)S3_ABORT_US) limit = (uint32_t)S3_ABORT_US;
+            uint32_t limit = 4u * b->max_t_us;
+            uint32_t floor_us = b->use_enc ? (uint32_t)S3_ABORT_ENC_US : (uint32_t)S3_ABORT_US;
+            if (limit < floor_us) limit = floor_us;
             if (gap > limit) fail(b, S3_BC_ERR_TIMEOUT, ev);   /* a short mark is dropped silently inside fail() */
         }
     }

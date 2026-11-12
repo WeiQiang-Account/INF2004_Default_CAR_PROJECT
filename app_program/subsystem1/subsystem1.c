@@ -99,8 +99,20 @@ void s1_snapshot_take(s1_snapshot_t *s)
 	s->line      = (int16_t)s3_line_position();
 	s->line_lost = s3_line_lost() ? 1u : 0u;
 	s->ir[0] = s3_ir_raw(0); s->ir[1] = s3_ir_raw(1); s->ir[2] = s3_ir_raw(2);
-	bar          = s3_last_barcode_cmd();
-	s->bar       = (int8_t)(((bar >= 0) && (bar <= 3)) ? bar : -1);
+	bar          = s3_last_barcode_cmd();		/* the character read, -1 none */
+	s->bar       = (char)(((bar > 0) && (bar < 128)) ? bar : 0);
+	s->bar_pend  = s5_barcode_pending();
+	s->bar_act   = s5_barcode_action(s->bar_pend ? s->bar_pend : s->bar);
+	s5_get_barcode_map(s->map);
+	s->bar_why   = (uint8_t)s3_barcode_fail_reason();
+	s->bar_n     = (uint8_t)s3_barcode_progress();
+	s->bar_fail_n = (uint8_t)s3_barcode_fail_widths(s->bar_fail_w, 29, &s->bar_fail_mm10);
+	s->bar_edges = s3_bar_edges();
+	s->junc_seen = (uint16_t)s3_junction_count();
+	s->junc      = s5_junction_count();
+	s->j_act     = s5_junction_last_act();
+	s->j_ch      = s5_junction_last_char();
+	s->lost_ms   = s5_line_lost_ms();
 	s->bar_count = s3_barcode_count();
 	s->bar_err   = s3_barcode_errors();
 
@@ -162,6 +174,14 @@ uint16_t s1_cmd_submit(const char *p, uint16_t len, char *reply, uint16_t size)
 	}
 	if (r == S1_OK) {
 		r = s1_cmd_check(cmd, st, robot_still(), &remote);
+	}
+	if ((r == S1_OK) && (cmd == S1_CMD_MAP)) {
+		char m[4];
+		if (!s1_cmd_map(p, len, m)) {
+			r = S1_REJ_BAD_JSON;		/* "m" must be 4 different characters A-Z / 0-9 / '-' */
+		} else {
+			s5_set_barcode_map(m);		/* used from the next junction on */
+		}
 	}
 	if ((r == S1_OK) && (cmd == S1_CMD_SERVO)) {
 		int32_t deg;

@@ -21,7 +21,20 @@ typedef struct {
 	int16_t  line;                                   /* -100..100 (S3)           */
 	uint8_t  line_lost;
 	uint16_t ir[3];
-	int8_t   bar;                                    /* -1 none, 0..3 = A..D     */
+	char     bar;                                    /* last character read, 0 none (S3)   */
+	char     bar_pend;                               /* stored, waiting for a junction (VC) */
+	char     map[4];                                 /* MQTT map F U L R, '-' = unset      */
+	uint8_t  bar_act;                                /* what the map gives 'bar': S5_JA_*  */
+	uint8_t  bar_why;                                /* last failed read reason            */
+	uint8_t  bar_n;                                  /* read in progress: elements so far (of 29) */
+	uint8_t  bar_fail_n;                             /* last failed read: how many bars/gaps ...  */
+	uint8_t  bar_fail_w[29];                         /* ... and their widths (bar, gap, bar ...) */
+	uint8_t  bar_fail_mm10;                          /* 1 = widths in 0.1 mm, 0 = in ms           */
+	uint32_t bar_edges;                              /* GP7 edges so far                   */
+	uint16_t junc_seen, junc;                        /* junctions seen by S3 / handled by VC */
+	uint8_t  j_act;                                  /* movement at the last junction      */
+	char     j_ch;                                   /* character used there, 0 none       */
+	uint16_t lost_ms;                                /* VC line-lost timer (FAULT at 3000) */
 	uint32_t bar_count, bar_err;
 	uint16_t hump_mm, hump_last_mm, hump_max_mm, humps;   /* S4                */
 	int16_t  pitch_x10, yaw_dps;
@@ -63,7 +76,9 @@ uint16_t s1_json_cmd_result(char *buf, uint16_t size, uint32_t t_ms, const char 
 
 /* ---------------------------------------------------------------- commands */
 typedef enum { S1_CMD_NONE = 0, S1_CMD_START, S1_CMD_STOP, S1_CMD_RESUME, S1_CMD_CANCEL, S1_CMD_RESET,
-               S1_CMD_SERVO /* {"cmd":"servo","deg":0..180 or -1,"seq":N}: dashboard test */ } s1_cmd_t;
+               S1_CMD_SERVO /* {"cmd":"servo","deg":0..180 or -1,"seq":N}: dashboard test */,
+               S1_CMD_MAP   /* {"cmd":"map","m":"FULR","seq":N}: barcode characters for Forward,
+                               U-turn, Left, Right (2026-11-11 demo: sent from the PC, not hard-coded) */ } s1_cmd_t;
 typedef enum {
 	S1_OK = 0,
 	S1_REJ_TOO_LONG,        /* payload > 64 bytes            */
@@ -90,6 +105,9 @@ typedef enum {
 s1_rej_t    s1_cmd_parse(const char *p, uint16_t len, s1_cmd_t *cmd, uint32_t *seq);
 /* optional integer field, e.g. "deg": true and *v if present and valid */
 bool        s1_cmd_int(const char *p, uint16_t len, const char *key, int32_t *v);
+/* the barcode map "m": exactly 4 different characters A-Z / 0-9 (or '-' = unused). Upper-cases. */
+bool        s1_cmd_map(const char *p, uint16_t len, char m[4]);
+const char *s1_act_name(uint8_t a);   /* S5_JA_*: "none" "forward" "uturn" "left" "right" */
 /* State rules: start in READY; resume and cancel in PAUSED; reset only in FAULT
  * with the robot still; stop at any time (forwarded only while RUNNING).
  * *remote = what to give the VC (S1_REMOTE_*).                               */

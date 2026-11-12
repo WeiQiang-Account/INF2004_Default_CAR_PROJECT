@@ -106,7 +106,13 @@ s5_action_t s5_plan_action(const s5_profile_t *p, int rescans_used)
 
     const int need = S5_ROBOT_WIDTH_MM + 2 * S5_SAFETY_MARGIN_MM;
     int lok = p->clr_l_mm >= need, rok = p->clr_r_mm >= need;
-    if (!lok && !rok) return rescans_used < S5_MAX_RESCAN ? S5_ACT_REVERSE_RETRY : S5_ACT_STOP;
+    if (!lok && !rok) {
+        /* both look narrow: the ultrasonic beam makes them look narrower than they are. Only
+           reverse if BOTH are really blocked; otherwise go round on the more open side. */
+        if ((p->clr_l_mm < S5_SIDE_BLOCKED_MM) && (p->clr_r_mm < S5_SIDE_BLOCKED_MM))
+            return rescans_used < S5_MAX_RESCAN ? S5_ACT_REVERSE_RETRY : S5_ACT_STOP;
+        return p->clr_l_mm >= p->clr_r_mm ? S5_ACT_TURN_LEFT : S5_ACT_TURN_RIGHT;
+    }
     if (lok && rok) {
         if (p->clr_l_mm >= S5_CLEAR_MAX_MM && p->clr_r_mm >= S5_CLEAR_MAX_MM)   /* both open: shorter detour */
             return s5_bypass_lateral_mm(p, 1) <= s5_bypass_lateral_mm(p, 0) ? S5_ACT_TURN_LEFT : S5_ACT_TURN_RIGHT;
@@ -118,14 +124,16 @@ s5_action_t s5_plan_action(const s5_profile_t *p, int rescans_used)
 int s5_bypass_lateral_mm(const s5_profile_t *p, int side_left)
 {
     int edge = side_left ? p->xl_mm : -p->xr_mm;          /* distance of the far edge on that side */
-    int lat  = edge + S5_ROBOT_WIDTH_MM / 2 + S5_SAFETY_MARGIN_MM;
+    int lat  = edge + S5_ROBOT_WIDTH_MM / 2 + S5_SAFETY_MARGIN_MM + S5_BYPASS_EXTRA_MM;
     int min  = S5_ROBOT_WIDTH_MM / 2 + S5_SAFETY_MARGIN_MM;
+    if (lat > S5_BYPASS_LAT_MAX_MM) lat = S5_BYPASS_LAT_MAX_MM;
     return lat < min ? min : lat;
 }
 
 int s5_bypass_forward_mm(const s5_profile_t *p)
 {
     int depth = p->width_mm > S5_OBST_MIN_DEPTH_MM ? p->width_mm : S5_OBST_MIN_DEPTH_MM; /* ASSUMPTION: roughly square */
+    if (depth > S5_OBST_MAX_DEPTH_MM) depth = S5_OBST_MAX_DEPTH_MM;
     return (int)p->closest_mm + depth + S5_ROBOT_LENGTH_MM + S5_SAFETY_MARGIN_MM;
 }
 

@@ -96,7 +96,7 @@
  * may be queued next to it, so mqtt.c's 256-byte default output buffer is too
  * small (mqtt_publish() would return ERR_MEM every time). QoS 1 events and
  * the subscription each hold a request slot until acknowledged. */
-#define MQTT_OUTPUT_RINGBUF_SIZE    1536   /* telemetry can be ~650 B (2026-11-07) */
+#define MQTT_OUTPUT_RINGBUF_SIZE    2560   /* telemetry up to ~870 B (2026-11-11: barcode/junction fields) */
 #define MQTT_REQ_MAX_IN_FLIGHT      8
 
 #endif /* LWIP_LWIPOPTS_H */

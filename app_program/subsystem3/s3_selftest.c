@@ -13,6 +13,21 @@ static const char *const PAT[5] = {      /* * A B C D, 1 = wide (independent of 
     "010010100", "100001001", "001001001", "101001000", "000011001"
 };
 
+/* every Code 39 character (standard table, typed in again here so the test does
+   not trust the decoder's own copy): character, 9 elements, 1 = wide          */
+static const struct { char ch; const char *p; } ALL39[] = {
+    {'0',"000110100"},{'1',"100100001"},{'2',"001100001"},{'3',"101100000"},{'4',"000110001"},
+    {'5',"100110000"},{'6',"001110000"},{'7',"000100101"},{'8',"100100100"},{'9',"001100100"},
+    {'A',"100001001"},{'B',"001001001"},{'C',"101001000"},{'D',"000011001"},{'E',"100011000"},
+    {'F',"001011000"},{'G',"000001101"},{'H',"100001100"},{'I',"001001100"},{'J',"000011100"},
+    {'K',"100000011"},{'L',"001000011"},{'M',"101000010"},{'N',"000010011"},{'O',"100010010"},
+    {'P',"001010010"},{'Q',"000000111"},{'R',"100000110"},{'S',"001000110"},{'T',"000010110"},
+    {'U',"110000001"},{'V',"011000001"},{'W',"111000000"},{'X',"010010001"},{'Y',"110010000"},
+    {'Z',"011010000"},{'-',"010000101"},{'.',"110000100"},{' ',"011000100"},{'$',"010101000"},
+    {'/',"010100010"},{'+',"010001010"},{'%',"000101010"}
+};
+#define N_ALL39 ((int)(sizeof(ALL39) / sizeof(ALL39[0])))
+
 static uint32_t rng_state = 12345u;
 static int rnd(int lo, int hi)           /* small LCG, same on every machine */
 {
@@ -20,12 +35,12 @@ static int rnd(int lo, int hi)           /* small LCG, same on every machine */
     return lo + (int)((rng_state >> 16) % (uint32_t)(hi - lo + 1));
 }
 
-/* the 29 element widths of  * X *  (x = 1..4 means A..D) */
-static void make_widths(int x, uint32_t narrow, int wide_x10, int jitter_pct, uint32_t *w)
+/* the 29 element widths of  * X *  with X's pattern 'mid' */
+static void make_widths_p(const char *mid, uint32_t narrow, int wide_x10, int jitter_pct, uint32_t *w)
 {
     int idx = 0;
     for (int c = 0; c < 3; c++) {
-        const char *p = PAT[(c == 1) ? x : 0];
+        const char *p = (c == 1) ? mid : PAT[0];
         for (int k = 0; k < 9; k++) {
             uint32_t base = (p[k] == '1') ? (narrow * (uint32_t)wide_x10 / 10u) : narrow;
             if ((idx % 2) == 1) base = base * 9u / 10u;                  /* spaces print a little thinner than bars */
@@ -33,6 +48,12 @@ static void make_widths(int x, uint32_t narrow, int wide_x10, int jitter_pct, ui
         }
         if (c < 2) w[idx++] = narrow * 9u / 10u;                          /* narrow gap between characters */
     }
+}
+
+/* x = 1..4 means A..D */
+static void make_widths(int x, uint32_t narrow, int wide_x10, int jitter_pct, uint32_t *w)
+{
+    make_widths_p(PAT[x], narrow, wide_x10, jitter_pct, w);
 }
 
 static void reverse29(const uint32_t *a, uint32_t *b)
@@ -54,6 +75,12 @@ int s3_st_decode_fwd(void)
             else if ((ch != 'A' + x - 1) || ((int)cmd != x - 1))      ok = 0;
         }
     }
+    for (int i = 0; i < N_ALL39; i++) {                  /* 2026-11-11: every character, A-Z and the rest */
+        for (int t = 0; t < 10; t++) {
+            make_widths_p(ALL39[i].p, 100, 30, 15, w);
+            if ((s3_decode(w, S3_BC_ELEMENTS, &ch, &cmd) != S3_DEC_OK) || (ch != ALL39[i].ch)) ok = 0;
+        }
+    }
     return ok;
 }
 
@@ -69,6 +96,13 @@ int s3_st_decode_rev(void)
             reverse29(w, r);
             if (s3_decode(r, S3_BC_ELEMENTS, &ch, &cmd) != S3_DEC_OK) ok = 0;
             else if ((ch != 'A' + x - 1) || ((int)cmd != x - 1))      ok = 0;
+        }
+    }
+    for (int i = 0; i < N_ALL39; i++) {                  /* every character read backwards decodes the same */
+        for (int t = 0; t < 10; t++) {
+            make_widths_p(ALL39[i].p, 100, 30, 15, w);
+            reverse29(w, r);
+            if ((s3_decode(r, S3_BC_ELEMENTS, &ch, &cmd) != S3_DEC_OK) || (ch != ALL39[i].ch)) ok = 0;
         }
     }
     return ok;
@@ -206,8 +240,12 @@ int s3_st_line_events(void)
     }
     if (found != 1) ok = 0;
 
-    /* junction: all three black. 2 samples = nothing, 3rd = ONE event, staying black = no repeat */
-    set3(r, 0, 1000, 0); s3_line_step(&l, r, false, &o);
+    /* a bend: the line crosses all three sensors diagonally after strong steering = NOT a junction */
+    for (int i = 0; i < 30; i++) { set3(r, 0, 300, 1000); s3_line_step(&l, r, false, &o); }    /* far right */
+    for (int i = 0; i < 6; i++) { set3(r, 1000, 1000, 1000); s3_line_step(&l, r, false, &o); if (o.events & S3_LINE_EVT_JUNCTION) ok = 0; }
+
+    /* junction: all three black after going straight. 2 samples = nothing, 3rd = ONE event, no repeat */
+    for (int i = 0; i < S3_JUNC_STRAIGHT_SAMPLES + 2; i++) { set3(r, 0, 1000, 0); s3_line_step(&l, r, false, &o); }
     for (int i = 1; i <= 30; i++) {
         set3(r, 1000, 1000, 1000); s3_line_step(&l, r, false, &o);
         if (o.events & S3_LINE_EVT_JUNCTION) { junc++; if (i != S3_JUNCTION_SAMPLES) ok = 0; }
@@ -297,7 +335,7 @@ int s3_st_bc_speeds(void)
                     else                                edges_from_widths(widths, starts[st], edges);
                     s3_bc_init(&bc);
                     st_result_t r = run(&bc, edges, 30, 4000000u);
-                    if (r.cmds != 1 || r.errors != 0 || r.first_type != S3_BC_EV_CMD || r.first_value != x - 1) ok = 0;
+                    if (r.cmds != 1 || r.errors != 0 || r.first_type != S3_BC_EV_CMD || r.first_value != 'A' + x - 1) ok = 0;
 #if S3_BC_DECODE_ON_29
                     /* FR15: the command is out within 100 ms of the stop bar (glitch window + poll = a few ms) */
                     if (r.first_at_us - edges[29].t > 100000u) ok = 0;
@@ -327,7 +365,7 @@ int s3_st_bc_glitch(void)
         }
         s3_bc_init(&bc);
         st_result_t r = run(&bc, g, n, 3000000u);
-        if (r.cmds != 1 || r.errors != 0 || r.first_value != x - 1) ok = 0;
+        if (r.cmds != 1 || r.errors != 0 || r.first_value != 'A' + x - 1) ok = 0;
     }
     return ok;
 }
