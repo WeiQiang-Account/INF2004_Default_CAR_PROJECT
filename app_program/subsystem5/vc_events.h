@@ -5,13 +5,16 @@
  * Explicit shifts/masks only (Tribunal: wire formats must not depend on C bit-field layout). */
 #ifndef VC_EVENTS_H
 #define VC_EVENTS_H
+#ifndef S3_JUNC_ARG_IS_MM
+#define S3_JUNC_ARG_IS_MM 1   /* 2026-11-18: VC_EV_JUNCTION arg = mm past the crossing (0..255) */
+#endif
 #include <stdint.h>
 
 enum {
     VC_EV_NONE = 0,
     VC_EV_BARCODE,       /* S3: arg = valid<<7 | character (ASCII, 7 bits). 2026-11-11: the VC maps the
                             character to a movement with the table sent over MQTT, at the next junction */
-    VC_EV_JUNCTION,      /* S3 */
+    VC_EV_JUNCTION,      /* S3: arg = mm the junction sensor is already past the cross line (S3_JUNC_ARG_IS_MM) */
     VC_EV_LINE_LOST,     /* S3 */
     VC_EV_LINE_FOUND,    /* S3 */
     VC_EV_HUMP_START,    /* S4 */
@@ -68,4 +71,10 @@ uint16_t s5_junction_count(void);               /* junctions handled by the VC  
 uint8_t  s5_junction_last_act(void);            /* S5_JA_* done at the last junction   */
 char     s5_junction_last_char(void);           /* character used there, 0 = none      */
 uint16_t s5_line_lost_ms(void);                 /* VC line-lost timer now, 0 = line seen */
+/* Barcode test (dashboard): drive straight d mm at v mm/s over the barcode and, if back,
+   return. Only from READY / COMPLETE. No line following, no junction moves. */
+int      s5_bcscan_request(int d_mm, int v_mm_s, int back);   /* 0 = accepted, -1 = not now */
+int      s5_bcscan_active(void);
+void     s5_set_cruise(int mm_s);               /* line-following speed (MQTT "speed"), clamped */
+uint16_t s5_cruise(void);
 #endif

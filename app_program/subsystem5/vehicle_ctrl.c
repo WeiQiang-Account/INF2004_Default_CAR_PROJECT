@@ -19,7 +19,7 @@ enum { VC_INIT = 0, VC_READY, VC_RUNNING, VC_PAUSED, VC_FAULT, VC_COMPLETE };
 enum { NAV_LINE = 0, NAV_BARCODE, NAV_OBSTACLE, NAV_RECOVERY };
 enum { OA_IDLE = 0, OA_WAIT_STOP, OA_WAIT_PROFILE, OA_REVERSE,
        B1_TURN, B2_LAT, B3_TURN, B4_FWD, B5_TURN, B6A_MOVE, B6B_SEEK, B6C_STOP, B7_ALIGN, BC_TURN,
-       JC_FWD, JC_TURN, JC_CLEAR };   /* junction: drive onto the crossing, turn / drive over it */
+       JC_FWD, JC_TURN, JC_CLEAR, SC_FWD, SC_BACK };   /* junction: drive onto the crossing, turn / drive over it */
 enum { CAUSE_NONE = 0, CAUSE_INIT, CAUSE_IMPACT, CAUSE_LINE_LOST, CAUSE_TIMEOUT, CAUSE_SENSOR, CAUSE_RECOVERY, CAUSE_MOTION };
 
 EXPORT ID mbf_vc_events;
@@ -54,6 +54,7 @@ static volatile char     g_bc_pend;            /* stored character, 0 = none */
 static volatile uint16_t g_j_count;
 static volatile uint8_t  g_j_act;
 static volatile char     g_j_char;
+static volatile uint16_t g_j_past;                   /* mm the junction sensor was already past the crossing */
 static uint32_t          g_j_ignore_until;
 static volatile uint16_t g_lost_ms;
 
@@ -101,7 +102,38 @@ static void buzz_tick(void)
 }
 
 /* ---------------------------------------------------------------- helpers */
-static void cruise(void) { s5_motion_drive(vc.degraded ? S5_CRUISE_DEGRADED_MM_S : S5_CRUISE_MM_S); }
+/* line-following speed: S5_CRUISE_MM_S at start-up, changeable from MQTT {"cmd":"speed","v":N} */
+static volatile uint16_t g_cruise = S5_CRUISE_MM_S;
+static volatile uint8_t  g_cruise_new;
+void     s5_set_cruise(int mm_s)
+{
+    if (mm_s < S5_CRUISE_MIN_MM_S) mm_s = S5_CRUISE_MIN_MM_S;
+    if (mm_s > S5_CRUISE_MAX_MM_S) mm_s = S5_CRUISE_MAX_MM_S;
+    g_cruise = (uint16_t)mm_s; g_cruise_new = 1;
+}
+uint16_t s5_cruise(void) { return g_cruise; }
+
+/* barcode test scan: request from S1 (Wi-Fi task), carried out in tick() */
+static volatile int16_t g_sc_d, g_sc_v;
+static volatile uint8_t g_sc_req, g_sc_back, g_sc_active;
+int s5_bcscan_request(int d, int v, int back)
+{
+    uint8_t st = vc_status_byte() & 7u;
+    if ((st != VC_READY && st != VC_COMPLETE) || g_sc_active) return -1;
+    if (d < 50) d = 50;
+    if (d > 800) d = 800;
+    if (v < 20) v = 20;
+    if (v > 150) v = 150;
+    g_sc_d = (int16_t)d; g_sc_v = (int16_t)v; g_sc_back = back ? 1u : 0u; g_sc_req = 1;
+    return 0;
+}
+int s5_bcscan_active(void) { return g_sc_active || g_sc_req; }
+static void cruise(void)
+{
+    int v = g_cruise;
+    if (vc.degraded && v > S5_CRUISE_DEGRADED_MM_S) v = S5_CRUISE_DEGRADED_MM_S;
+    s5_motion_drive(v);
+}
 
 static void to_state(int s) { vc.state = (uint8_t)s; vc.t_state = now_ms(); update_status(); }
 
@@ -163,7 +195,9 @@ static void issue_step(int s)
     case B6A_MOVE: vc.seek_hits = 0; s5_motion_move(vc.lat_mm - S5_LINE_TOL_MM); break;
     case B7_ALIGN: s5_motion_turn( vc.side * 90);              break;
     case OA_REVERSE: s5_motion_move(-S5_REVERSE_MM);           break;
-    case JC_FWD:   s5_motion_move(S5_SENSOR_AXLE_MM);          break;   /* axle onto the crossing */
+    case JC_FWD: {                                                      /* axle onto the crossing */
+                   int d = (int)S5_SENSOR_AXLE_MM - (int)g_j_past;
+                   s5_motion_move(d < 5 ? 5 : d);              break; }
     case JC_CLEAR: s5_motion_move(S5_JUNCTION_CLEAR_MM);       break;   /* straight over it */
     case JC_TURN:  s5_motion_turn(g_j_act == S5_JA_LEFT ? 90 : g_j_act == S5_JA_RIGHT ? -90 : 180); break;
     default: break;
@@ -254,6 +288,7 @@ static void on_profile(const uint32_t w[2])
 static void start_run(void)
 {
     if (s5_servo_is_manual()) s5_servo_manual(-1);           /* dashboard servo test: back to automatic */
+    g_sc_active = 0; g_sc_req = 0;                           /* START ends a barcode test scan */
     s5_scan_request(S5_REQ_GUARD_OFF);                       /* fresh start: re-arm obstacle detection */
     s5_motion_reset();   /* 2026-11-07: an E-stop while READY (robot picked up / knocked) left S2 in
                             FAULT, which ignores DRIVE, so START did nothing. No-op if S2 is fine. */
@@ -291,6 +326,9 @@ static void on_start(void)
 }
 static void on_stop(void)
 {
+    if (vc.step == SC_FWD || vc.step == SC_BACK) {  /* stop a barcode test scan */
+        s5_motion_stop(); vc.step = OA_IDLE; g_sc_active = 0; g_sc_req = 0; return;
+    }
     if (vc.state == VC_RUNNING) pause_mission("stop pressed");
     else if (vc.state == VC_PAUSED) { to_state(VC_READY); nav_to(NAV_LINE); }   /* cancel */
 }
@@ -318,7 +356,10 @@ static void on_event(const uint32_t w[2])
         S5_PRINT("[VC] barcode '%c' stored (map -> action %u)\n", g_bc_pend, (unsigned)s5_barcode_action(g_bc_pend));
         break;
     case VC_EV_JUNCTION:
-        if (vc.nav == NAV_LINE && vc.step == OA_IDLE && (int32_t)(now_ms() - g_j_ignore_until) >= 0) junction_begin();
+        if (vc.nav == NAV_LINE && vc.step == OA_IDLE && (int32_t)(now_ms() - g_j_ignore_until) >= 0) {
+            g_j_past = (uint16_t)(S3_JUNC_ARG_IS_MM ? (arg & 0xFFu) : 0u);   /* S3: mm already past the cross line */
+            junction_begin();
+        }
         break;
     case VC_EV_LINE_LOST:  if (vc.nav == NAV_LINE && !vc.lost_since) vc.lost_since = now_ms(); break;
     case VC_EV_LINE_FOUND: if (s5_hook_line_lost() < 0) vc.lost_since = 0; break;   /* polled path decides (needs a steady line) */
@@ -352,6 +393,23 @@ static void tick(void)
     else if (go_start) on_start();
 
     if ((vc.state == VC_RUNNING || vc.state == VC_PAUSED) && s5_motion_faulted()) enter_fault(CAUSE_MOTION);
+
+    /* ---- barcode test scan (dashboard): straight over the barcode, slowly, then back ---- */
+    if (g_sc_req && (vc.state == VC_READY || vc.state == VC_COMPLETE) && vc.step == OA_IDLE) {
+        g_sc_req = 0; g_sc_active = 1;
+        if (s5_servo_is_manual()) s5_servo_manual(-1);
+        s5_motion_reset();
+        s5_motion_clear_done(); s5_motion_move_v(g_sc_d, g_sc_v); step_to(SC_FWD);
+        S5_PRINT("[VC] barcode scan: %d mm at %d mm/s%s\n", g_sc_d, g_sc_v, g_sc_back ? ", then back" : "");
+    }
+    if (vc.step == SC_FWD || vc.step == SC_BACK) {
+        uint32_t limit = (uint32_t)g_sc_d * 1000u / (uint32_t)g_sc_v + 4000u;
+        if (vc.state != VC_READY && vc.state != VC_COMPLETE) { vc.step = OA_IDLE; g_sc_active = 0; }
+        else if (s5_motion_wait_done(TMO_POL) == E_OK) {
+            if (vc.step == SC_FWD && g_sc_back) { s5_motion_clear_done(); s5_motion_move_v(-g_sc_d, g_sc_v); step_to(SC_BACK); }
+            else { vc.step = OA_IDLE; g_sc_active = 0; S5_PRINT("[VC] barcode scan done\n"); }
+        } else if (t - vc.t_step > limit) { s5_motion_stop(); vc.step = OA_IDLE; g_sc_active = 0; }
+    }
 
     switch (vc.state) {
     case VC_INIT:
@@ -409,6 +467,11 @@ static void tick(void)
     default: break;
     }
     vc.lost_tick = t;
+    if (g_cruise_new) {                              /* new speed from MQTT: use it now if following the line */
+        g_cruise_new = 0;
+        if (vc.state == VC_RUNNING && vc.nav == NAV_LINE && vc.step == OA_IDLE) cruise();
+        S5_PRINT("[VC] line-following speed %u mm/s\n", (unsigned)g_cruise);
+    }
     g_lost_ms = (vc.state == VC_RUNNING && vc.nav == NAV_LINE)
               ? (uint16_t)((vc.lost_acc > 60000u) ? 60000u : vc.lost_acc) : 0u;
 }

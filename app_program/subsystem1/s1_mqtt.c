@@ -25,6 +25,7 @@
 #define S1_T_EVENT	"se14/robot/event"
 #define S1_T_CMD	"se14/robot/cmd"
 #define S1_T_STATUS	"se14/robot/status"
+#define S1_T_BCRAW	"se14/robot/bcraw"	/* barcode test: raw barcode-sensor samples */
 #define S1_TICK_MS	200u
 #define S1_HB_TICKS	5u		/* heartbeat every 1 s */
 #define S1_EVENTS_PER_TICK 2u
@@ -51,6 +52,7 @@ static uint32_t		s_t0, s_ticks, s_connects, s_tx_fail;
 static s1_snapshot_t	s_seen;
 static bool		s_seen_ok;
 static bool		s_was_up;
+static bool		s_raw_was_on;
 
 static char		s_rx[S1_CMD_MAX_LEN + 1u];
 static u16_t		s_rx_len;
@@ -152,6 +154,35 @@ static void tick(void *arg)
 
 		n = s1_json_telemetry(buf, (u16_t)sizeof(buf), &now);
 		(void)pub(S1_T_TELEM, buf, n, 0);
+
+		if (s1_bcraw_on()) {			/* barcode test page: ~40 samples (200 ms) per message */
+			static uint32_t	raw_from;
+			static uint8_t	raw[80];
+			uint32_t	first;
+			uint16_t	m;
+			if (!s_raw_was_on) {		/* just switched on: start from NOW, drop the backlog */
+				while (s1_bcraw_get(&raw_from, raw, (uint16_t)sizeof(raw)) == (uint16_t)sizeof(raw)) { }
+			}
+			if (s1_bcraw_all3()) {		/* recorded run: 3 sensors, 60 samples max (~800 B) */
+				static uint8_t rc[60], rr[60];
+				m = s1_bcraw_get3(&raw_from, raw, rc, rr, 60u);
+				first = raw_from - m;
+				if (m > 0u) {
+					n = s1_json_bcraw3(buf, (u16_t)sizeof(buf), now.t_ms, first, raw, rc, rr, m);
+					(void)pub(S1_T_BCRAW, buf, n, 0);
+				}
+			} else {
+				m = s1_bcraw_get(&raw_from, raw, (uint16_t)sizeof(raw));
+				first = raw_from - m;
+				if (m > 0u) {
+					n = s1_json_bcraw(buf, (u16_t)sizeof(buf), now.t_ms, first, raw, m);
+					(void)pub(S1_T_BCRAW, buf, n, 0);
+				}
+			}
+			s_raw_was_on = true;
+		} else {
+			s_raw_was_on = false;
+		}
 
 		for (k = 0; k < S1_EVENTS_PER_TICK; k++) {
 			next = s_seen;

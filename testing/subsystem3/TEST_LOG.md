@@ -14,11 +14,13 @@ Define a test here before running it. Test IDs never change.
 | S3-U02 | barcodes read backwards decode the same | FR15 | auto | as above | `[TEST] S3-U02 PASS` |
 | S3-U03 | 28 elements / flat widths / damaged code rejected | FR15 | auto | as above | `[TEST] S3-U03 PASS` |
 | S3-U04 | line position, steering sign, calibration range check | FR13 | auto | as above | `[TEST] S3-U04 PASS` |
-| S3-U05 | line lost in 8 samples (40 ms), found, junction once, no junction during a barcode | FR14 | auto | as above | `[TEST] S3-U05 PASS` |
+| S3-U05 | line lost in 8 samples (40 ms), found, junction once; a cross-junction is still seen while the barcode reader is busy, bars beside the line are not a junction (2026-11-18) | FR14 | auto | as above | `[TEST] S3-U05 PASS` |
 | S3-U06 | edges → command at 3 speeds, both ways, timer wrap, within 100 ms | FR15 | auto | as above | `[TEST] S3-U06 PASS` |
 | S3-U07 | spikes shorter than 1 ms inside the code filtered | FR15 | auto | as above | `[TEST] S3-U07 PASS` |
-| S3-U08 | incomplete or damaged code → error, lone black mark ignored | FR15 | auto | as above | `[TEST] S3-U08 PASS` |
+| S3-U08 | too short or damaged code → error; lost last bars (stop `*`) → letter still read from start `*` + letter; lone black mark ignored | FR15 | auto | as above | `[TEST] S3-U08 PASS` |
 | S3-U09 | same barcode not read twice inside 300 ms | FR15 | auto | as above | `[TEST] S3-U09 PASS` |
+| S3-U13 | thin bars with a blurred sensor: analog signal with a 9 mm spot, 6 mm narrow bars, only 50 % dark, noise → A–Z both directions read, ≥ 50/52 right, no wrong letter (adaptive bar finder + halfway edges + best-fit decode, 2026-11-18) | FR15 | auto | as above | `[TEST] S3-U13 PASS` |
+| S3-U14 | junction from the left (barcode) sensor, which sits ~3 cm behind the centre/right pair: a 20 mm cross line → one junction, reported ~45 mm past its middle; a barcode, the track line (60 mm), the pair off the line, or a bend → none (2026-11-18) | FR13 | auto | as above | `[TEST] S3-U14 PASS` |
 | S3-U10 | IR sensors calibrated, no ADC errors | IF: IR ADC | auto | as above (sweep the sensors over black and white) | `[TEST] S3-U10 PASS` |
 | S3-U11 | line task runs every 5 ms (15–25 samples per 100 ms) | NFR | auto | as above | `[TEST] S3-U11 PASS` |
 | S3-U12 | GP7 edge interrupt counts edges (≥ 4 in 5 s) | IF: GPIO IRQ | auto | as above (pass a black mark under the barcode sensor) | `[TEST] S3-U12 PASS` |

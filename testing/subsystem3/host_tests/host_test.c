@@ -15,11 +15,13 @@ int main(void)
 	check("S3-U02", s3_st_decode_rev(),    "A-D + all 43 chars backwards -> same character");
 	check("S3-U03", s3_st_decode_reject(), "wrong count / flat widths / damaged code rejected");
 	check("S3-U04", s3_st_line_steer(),    "line position, steering sign, calibration check");
-	check("S3-U05", s3_st_line_events(),   "lost in 40 ms, found, junction once, suppressed");
+	check("S3-U05", s3_st_line_events(),   "lost in 40 ms, found, junction once, seen while reading a barcode");
 	check("S3-U06", s3_st_bc_speeds(),     "barcode at 3 speeds, both directions, wrap-safe");
 	check("S3-U07", s3_st_bc_glitch(),     "short spikes filtered");
-	check("S3-U08", s3_st_bc_errors(),     "incomplete code -> error, lone mark -> nothing");
+	check("S3-U08", s3_st_bc_errors(),     "too short -> error, lost stop bars -> * + letter read, lone mark -> nothing");
 	check("S3-U09", s3_st_bc_cooldown(),   "same barcode not read twice");
+	check("S3-U13", s3_st_bc_analog(),     "blurred analog barcode (9 mm spot, 6 mm bars, 50 % dark) -> A-Z both ways, no wrong letter");
+	check("S3-U14", s3_st_junction_left(), "junction from the left sensor: cross line once (+ mm past), not a barcode / the line / off the line / on a bend");
 	printf("%d failed\n", fails);
 	return fails;
 }

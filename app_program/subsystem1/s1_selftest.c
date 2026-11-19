@@ -27,7 +27,7 @@ static s1_snapshot_t busy(void)		/* every field at a large value: longest JSON *
 	s.dist_mm = 65535; s.line = -100; s.ir[0] = s.ir[1] = s.ir[2] = 4095; s.bar = 'D';
 	s.bar_pend = 'Z'; s.bar_act = 1; s.map[0] = 'A'; s.map[1] = 'B'; s.map[2] = 'C'; s.map[3] = 'D';
 	s.bar_count = 4000000000u; s.bar_err = 4000000000u; s.bar_why = 12; s.bar_n = 29; s.bar_edges = 4000000000u;
-	s.junc_seen = 65535; s.junc = 65535; s.j_act = 1; s.j_ch = 'X'; s.line_lost = 1; s.lost_ms = 60000;
+	s.junc_seen = 65535; s.junc = 65535; s.j_act = 1; s.j_ch = 'X'; s.line_lost = 1; s.lost_ms = 60000; s.cruise = 250;
 	s.hump_mm = 511; s.hump_max_mm = 511; s.pitch_x10 = -900; s.mclass = 3;
 	s.obs_mm = 4000; s.obs_w_mm = 4000; s.clr_l_mm = 4000; s.clr_r_mm = 4000; s.act = 4;
 	s.faults = 0xFFFFFFFFu;
@@ -86,6 +86,12 @@ bool s1_st_parse(void)
 		ok = ok && (s1_cmd_parse(mp, LEN(mp), &c, &q) == S1_OK) && (c == S1_CMD_MAP) && (q == 9u);
 		ok = ok && s1_cmd_map(mp, LEN(mp), m) && (m[0] == 'Q') && (m[1] == 'W') && (m[2] == 'A') && (m[3] == 'B');
 		ok = ok && !s1_cmd_map(md, LEN(md), m) && !s1_cmd_map(ms, LEN(ms), m) && !s1_cmd_map(a, LEN(a), m);
+	}
+	{	/* line-following speed: {"cmd":"speed","v":70,"seq":N} */
+		const char *sp = "{\"cmd\":\"speed\",\"v\":70,\"seq\":11}";
+		int32_t v = 0;
+		ok = ok && (s1_cmd_parse(sp, LEN(sp), &c, &q) == S1_OK) && (c == S1_CMD_SPEED) && (q == 11u);
+		ok = ok && s1_cmd_int(sp, LEN(sp), "v", &v) && (v == 70);
 	}
 	return ok;
 }

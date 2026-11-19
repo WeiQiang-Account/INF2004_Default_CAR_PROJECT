@@ -11,6 +11,7 @@
 void s5_motion_stop(void);
 void s5_motion_drive(int mm_per_s);
 void s5_motion_move(int mm);
+void s5_motion_move_v(int mm, int v);	/* straight move at speed v mm/s (barcode scan) */
 void s5_motion_turn(int deg);
 void s5_motion_reset(void);
 void s5_motion_clear_done(void);	/* call BEFORE the command you will wait on */

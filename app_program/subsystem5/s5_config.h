@@ -123,6 +123,8 @@
 #endif
 #define S5_CRUISE_MM_S      80    /* line-following speed. 2026-11-07: halved from 200; 2026-11-11: 100 -> 80 (barcode + bends) */
 #define S5_CRUISE_DEGRADED_MM_S 80 /* after IMU_LOST (Tribunal: degrade, not E-stop) */
+#define S5_CRUISE_MIN_MM_S  40    /* limits for the speed set over MQTT */
+#define S5_CRUISE_MAX_MM_S  250
 #define S5_CREEP_MM_S       100
 #define S5_LINE_TOL_MM      40    /* line is accepted only within +/- this of the expected crossing */
 #define S5_LINE_LOST_TMO_MS 3000  /* system statechart                          */
@@ -138,8 +140,10 @@
 
 /* ---- Junctions (2026-11-11 demo: barcode character -> movement at the next cross-junction) */
 #ifndef S5_SENSOR_AXLE_MM
-#define S5_SENSOR_AXLE_MM   100   /* MEASURE: IR sensor bar to the wheel axle. Before a junction turn the
-                                     robot drives this far so it turns ON the crossing, not before it */
+#define S5_SENSOR_AXLE_MM    70   /* MEASURE: LEFT (barcode) sensor to the wheel axle, along the travel
+                                     direction. 2026-11-18: junctions are now seen by the left sensor
+                                     (S3_JUNC_FROM_LEFT); it reports how far it is already past the cross
+                                     line, and the robot drives the rest so it turns ON the crossing */
 #endif
 #define S5_JUNCTION_CLEAR_MM 60   /* "forward": drive straight this far over the crossing, ignoring the
                                      side branches (they pulled the line follower off at the top right) */

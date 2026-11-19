@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SE14 Robot Dashboard</title>
-<!-- version 2026-11-06c -->
+<!-- version 2026-11-18 (v21: barcode scan test merged in) -->
 <!--
   SE14 robot dashboard. Open this file in Chrome / Edge on the laptop that runs Mosquitto.
   Needs a WebSocket listener in mosquitto.conf (see tools/dashboard/README.md):
@@ -106,6 +106,11 @@ canvas{width:100%;height:120px;display:block}
 .bcprog{height:8px;background:var(--track);border-radius:4px;overflow:hidden;margin-top:6px}
 .barpic{display:flex;height:26px;border:1px solid var(--line);border-radius:4px;overflow:hidden;margin-top:4px;background:#fff}
 .barpic span{display:block;height:100%}
+.scanin{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-bottom:8px}
+.scanin label{display:flex;flex-direction:column;font-size:12px;color:var(--muted);gap:2px}
+.scanin input,.scanin select{width:90px}
+select{font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:5px 8px}
+#bcwave{height:200px;background:var(--bg);border:1px solid var(--line);border-radius:6px}
 .bcprog>span{display:block;height:100%;width:0;background:var(--accent);transition:width .15s}
 .ok-t{color:var(--ok)} .bad-t{color:var(--bad)} .warn-t{color:var(--warn)}
 .lostbar{height:8px;background:var(--track);border-radius:4px;overflow:hidden;margin:4px 0 2px}
@@ -115,7 +120,8 @@ canvas{width:100%;height:120px;display:block}
 </head>
 <body>
 <header>
-  <h1>SE14 Robot <span class="age">v18</span></h1>
+  <h1>SE14 Robot <span class="age">v21</span></h1>
+  <a href="#bcscan" style="color:var(--accent);font-weight:600">Barcode scan test ↓</a>
   <div class="conn">
     <label for="host" class="age">Broker</label>
     <input id="host" value="10.142.246.70" aria-label="broker IP">
@@ -178,6 +184,32 @@ canvas{width:100%;height:120px;display:block}
       <div class="lostbar"><span id="b_lost"></span></div>
       <div class="hint">Demo: the robot stores the character it reads, then does the mapped movement at the next cross-junction (not in the map / nothing stored = forward). The mapping must be sent before START. Barcodes are read by the <b>left</b> sensor (its analog value): drive so the barcode is on the robot's left. "Edges" should rise by about 30 for one barcode (29 bars and gaps); much fewer = bars merging (sensor too high / moving unevenly).</div>
     </section>
+
+    <section class="card wide" id="bcscan">
+      <h2>Barcode scan test (robot drives itself over a barcode, no line following)</h2>
+      <div class="scanin">
+        <label>Distance (mm)<input id="sc_d" type="number" min="50" max="800" step="10" value="450"></label>
+        <label>Speed (mm/s)<input id="sc_v" type="number" min="20" max="150" step="5" value="50"></label>
+        <label>Return to start<select id="sc_back"><option value="1">yes</option><option value="0">no</option></select></label>
+        <button class="primary" id="sc_go">Scan barcode</button>
+        <button data-cmd="stop">Stop</button>
+        <button data-cmd="reset">Reset FAULT</button>
+        <button id="sc_live">Live sensor: off</button>
+        <span id="sc_res" class="age"></span>
+      </div>
+      <div class="hint">Robot in <b>READY</b> (IR calibrated; if FAULT press Reset FAULT). Put it about 5 cm <b>before</b> the barcode, pointing along it, barcode under the <b>left</b> sensor. Distance = barcode length + 10 cm (30 cm barcode → 450 mm) so the sensor passes the last bar. The letter appears in the big tile above; a failed read shows its bar picture there.</div>
+      <div class="lbl" style="margin-top:10px"><span>What the barcode sensor sees, last 6 s (0 = white, 100 = black; shaded = counted as a bar)</span><span id="sc_n"></span></div>
+      <canvas id="bcwave"></canvas>
+      <div class="scanin" style="margin-top:12px">
+        <b style="font-size:13px">Record a run (all 3 line sensors, for checking junctions)</b>
+        <button id="rec_go">Start recording</button>
+        <button id="rec_stop">Stop + download CSV</button>
+        <span id="rec_n" class="age">not recording</span>
+      </div>
+      <div class="hint">Press Start recording, then START the robot and let it drive through the junction(s). Then Stop + download, and send the CSV file. It saves every 5 ms sample of the left / centre / right sensors and marks the junctions, barcodes and other events.</div>
+      <div class="hint">A good pass shows 15 shaded blocks (the bars) with white between them. Thin bars are found even if they only rise a little; if bars still merge, lower the sensor / point it straight down. The wave streams during a scan, or with "Live sensor" on (e.g. when sliding the robot by hand).</div>
+    </section>
+
 
     <section class="card">
       <h2>Wheels</h2>
@@ -251,6 +283,11 @@ canvas{width:100%;height:120px;display:block}
         <button data-cmd="resume">RESUME</button>
         <button data-cmd="cancel">CANCEL</button>
         <button data-cmd="reset">RESET</button>
+      </div>
+      <div class="lbl" style="margin-top:10px"><span>Line-following speed</span><span id="v_cruise">-</span></div>
+      <div class="btns" style="align-items:center">
+        <input id="spd_in" type="number" min="40" max="250" step="10" value="80" style="width:80px"> <span style="color:var(--muted)">mm/s</span>
+        <button id="spd_send">Set speed</button>
       </div>
       <div id="cmdres">Lift the wheels before START.</div>
     </section>
@@ -391,6 +428,7 @@ function onTelemetry(t){
   lastTel = t; telCount++;
   set("v_state", t.state); set("v_nav", (t.state === "RUNNING" || t.state === "PAUSED") ? (NAV[t.nav] ?? t.nav) : "-"); set("v_motion", (t.motion === "FAULT" && t.m_cause) ? ("FAULT: " + (MCAUSE[t.m_cause] ?? t.m_cause)) : t.motion);
   set("v_ircal", t.ir_cal === undefined ? "-" : (t.ir_cal ? "yes" : "NO - sweep over black and white"));
+  if (t.cruise !== undefined) set("v_cruise", t.cruise + " mm/s");
   if (t.map !== undefined){
     const m = t.map;
     set("v_bar", t.bar ? t.bar : "none yet");
@@ -402,13 +440,14 @@ function onTelemetry(t){
     set("v_jlast", t.junc ? (chs(t.j_ch) + " → " + (JA[t.j_act] ?? t.j_act)) : "-");
     const de = lastEdges === null ? 0 : t.bc_edges - lastEdges; lastEdges = t.bc_edges;
     set("v_bc_edges", t.bc_edges + (de > 0 ? "  (+" + de + " now)" : ""));
-    set("v_bc_cnt", t.bc_ok + " / " + t.bc_err);
+    set("v_bc_cnt", t.bc_ok + " / " + t.bc_err + (t.bc_pt ? "  (" + t.bc_pt + " from * + letter only)" : ""));
     /* big "current barcode" tile: the letter, its movement, and the read in progress */
     if (lastBcOk !== null && t.bc_ok !== lastBcOk) bcAt = Date.now();
     lastBcOk = t.bc_ok;
     set("bc_big", t.bar ? (t.bar === " " ? "␣" : t.bar) : "–");
     set("bc_bigact", t.bar ? ("→ " + (JA[t.bar_act] ?? t.bar_act) + (t.bar_p ? "  (stored for the next junction)" : "")) : "nothing read yet");
     const n = t.bc_n || 0;
+    set("sc_n", n > 0 ? ("reading… " + n + " / 29") : "");
     $("bc_big").classList.toggle("fresh", Date.now() - bcAt < 2500);
     $("bc_big").classList.toggle("reading", n > 0);
     set("bc_progtxt", n > 0 ? ("reading… " + n + " / 29 bars and gaps") : "not reading");
@@ -487,6 +526,7 @@ function logLine(text, cls){
 
 function onEvent(e){
   let txt, cls = "";
+  if (rec && e.ev !== "cmd_accepted" && e.ev !== "cmd_rejected") recEvent(e.ev + (e.ch !== undefined ? " " + e.ch : "") + (e.act !== undefined ? " " + e.act : "") + (e.to !== undefined ? " " + e.to : "") + (e.w_cm !== undefined ? " w" + e.w_cm + "cm" : ""));
   switch (e.ev){
     case "state": txt = "State " + e.from + " → " + e.to + (e.why ? ": " + e.why : "");
       cls = e.to === "FAULT" ? "bad b" : e.to === "RUNNING" ? "ok b" : "b"; break;
@@ -500,8 +540,10 @@ function onEvent(e){
     case "obstacle": txt = "Obstacle scan: " + (ACT[e.act] ?? e.act) + ", closest " + e.closest_cm + " cm, width " + e.w_cm + " cm"; cls = "warn"; break;
     case "imu": txt = "IMU " + e.state; cls = e.state === "ok" ? "ok" : e.state === "calibrating" ? "" : "bad"; break;
     case "cmd_accepted": txt = "Command " + e.cmd + " (seq " + e.seq + ") accepted"; cls = "ok";
+      if (e.cmd === "bcscan") set("sc_res", "✓ scanning…");
       set("cmdres", "✓ " + e.cmd + " accepted"); break;
     case "cmd_rejected": txt = "Command " + e.cmd + " (seq " + e.seq + ") rejected: " + e.reason; cls = "bad";
+      if (e.cmd === "bcscan") set("sc_res", "✗ scan rejected: " + (e.reason === "not_allowed_now" ? "robot must be READY (IR calibrated; press Reset FAULT if FAULT)" : e.reason));
       set("cmdres", "✗ " + e.cmd + " rejected: " + ({not_allowed_now:"not allowed in this state", old_seq:"old sequence number", unknown_cmd:"unknown command", bad_json:"bad message", too_long:"too long"}[e.reason] ?? e.reason)); break;
     case "WATCHDOG_RESET": txt = "The robot was reset by the watchdog (something froze)"; cls = "bad b"; break;
     default: txt = JSON.stringify(e);
@@ -509,12 +551,55 @@ function onEvent(e){
   logLine(txt, cls);
 }
 
+/* ------------------------------------------------------------------ barcode sensor wave (se14/robot/bcraw) */
+const SAMPLES = 1200;                       /* 6 s at 5 ms */
+let samp = new Uint8Array(SAMPLES), sampN = 0, lastIdx = null, scLive = false;
+function addSamp(v){ if (sampN < SAMPLES) samp[sampN++] = v; else { samp.copyWithin(0, 1); samp[SAMPLES - 1] = v; } }
+/* recorded run (bcraw v=2): every sample of all 3 sensors + event marks, for a CSV */
+let rec = null;
+function recEvent(text){ if (rec) rec.ev.push([lastIdx === null ? 0 : lastIdx, text]); }
+function recSamples(j){
+  if (!rec || !j.c) return;
+  if (rec.first === null) rec.first = j.i;
+  for (let k = 0; k < j.s.length; k++) rec.rows.push([j.i + k, j.s[k], j.c[k], j.r[k]]);
+  set("rec_n", "recording… " + (rec.rows.length * 0.005).toFixed(1) + " s");
+}
+function pushSamples(first, arr){
+  if (lastIdx !== null && first > lastIdx){ const gap = Math.min(first - lastIdx, 200); for (let i = 0; i < gap; i++) addSamp(255); }   /* lost message: gap */
+  for (const v of arr) addSamp(v);
+  lastIdx = first + arr.length;
+  drawWave();
+}
+function drawWave(){
+  const c = $("bcwave"), r = c.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  if (!r.width) return;
+  c.width = r.width * dpr; c.height = r.height * dpr;
+  const g = c.getContext("2d"); g.scale(dpr, dpr);
+  const css = getComputedStyle(document.documentElement), W = r.width, H = r.height;
+  const x0 = W - sampN * W / SAMPLES, dx = W / SAMPLES;
+  g.fillStyle = css.getPropertyValue("--okbg").trim() || "#dfd";
+  for (let i = 0; i < sampN; i++) if (samp[i] !== 255 && (samp[i] & 128)) g.fillRect(x0 + i * dx, 0, dx + 0.6, H);
+  g.strokeStyle = css.getPropertyValue("--line").trim(); g.lineWidth = 1;
+  for (const p of [0.25, 0.5, 0.75]){ g.beginPath(); g.moveTo(0, H * p); g.lineTo(W, H * p); g.stroke(); }
+  g.strokeStyle = css.getPropertyValue("--accent").trim(); g.lineWidth = 2; g.beginPath(); let pen = false;
+  for (let i = 0; i < sampN; i++){
+    if (samp[i] === 255){ pen = false; continue; }
+    const y = H - 6 - (samp[i] & 127) / 100 * (H - 12), x = x0 + i * dx;
+    if (!pen){ g.moveTo(x, y); pen = true; } else g.lineTo(x, y);
+  }
+  g.stroke();
+  g.fillStyle = css.getPropertyValue("--muted").trim(); g.font = "11px system-ui";
+  g.fillText("black 100", 4, 12); g.fillText("white 0", 4, H - 4);
+}
+window.addEventListener("resize", drawWave);
+
 function onMessage(topic, text){
   lastMsg = Date.now();
   try {
     if (topic === "se14/robot/status"){ statusText = text; banner(); return; }
     if (topic === "se14/robot/debug") return;
     const j = JSON.parse(text);
+    if (topic === "se14/robot/bcraw"){ recSamples(j); pushSamples(j.i, j.s); return; }
     if (topic === "se14/robot/telemetry") onTelemetry(j);
     else if (topic === "se14/robot/heartbeat") onHeartbeat(j);
     else if (topic === "se14/robot/event") onEvent(j);
@@ -546,6 +631,18 @@ document.querySelectorAll("[data-cmd]").forEach(b => b.onclick = () => {
 });
 $("clearlog").onclick = () => { $("log").innerHTML = ""; };
 
+/* line-following speed -> {"cmd":"speed","v":N,"seq":N} (robot accepts 40..250) */
+$("spd_in").value = store.get("se14.spd", "80");
+$("spd_send").onclick = () => {
+  const v = parseInt($("spd_in").value, 10);
+  if (!(v >= 40 && v <= 250)){ set("cmdres", "Speed: 40 to 250 mm/s."); return; }
+  if (!client){ set("cmdres", "Connect first."); return; }
+  store.set("se14.spd", String(v));
+  seq++;
+  client.publish("se14/robot/cmd", JSON.stringify({ cmd: "speed", v: v, seq }));
+  set("cmdres", "Sent speed " + v + " mm/s (seq " + seq + ")");
+};
+
 /* barcode map: 4 characters for Forward, U-turn, Left, Right -> {"cmd":"map","m":"FULR","seq":N} */
 const MAPIDS = ["m_f", "m_u", "m_l", "m_r"];
 MAPIDS.forEach((id, i) => { $(id).value = (store.get("se14.map", "") + "    ")[i].trim(); });
@@ -559,6 +656,48 @@ $("sendmap").onclick = () => {
   seq++;
   client.publish("se14/robot/cmd", JSON.stringify({ cmd: "map", m: m, seq }));
   set("cmdres", "Sent mapping F " + m[0] + " U " + m[1] + " L " + m[2] + " R " + m[3] + " (seq " + seq + ")");
+};
+
+/* barcode scan test -> {"cmd":"bcscan","d":mm,"v":mm/s,"back":0/1,"seq":N}; live wave -> {"cmd":"bcraw","v":0/1} */
+$("sc_d").value = store.get("se14.scd2", "450"); $("sc_v").value = store.get("se14.scv", "50");
+$("sc_go").onclick = () => {
+  const d = parseInt($("sc_d").value, 10), v = parseInt($("sc_v").value, 10);
+  if (!(d >= 50 && d <= 800 && v >= 20 && v <= 150)){ set("cmdres", "Scan: distance 50–800 mm, speed 20–150 mm/s."); set("sc_res", "distance 50–800 mm, speed 20–150 mm/s"); return; }
+  if (!client){ set("cmdres", "Connect first."); return; }
+  store.set("se14.scd2", String(d)); store.set("se14.scv", String(v));
+  seq++;
+  client.publish("se14/robot/cmd", JSON.stringify({ cmd: "bcscan", d: d, v: v, back: parseInt($("sc_back").value, 10), seq }));
+  set("cmdres", "Sent scan " + d + " mm at " + v + " mm/s (seq " + seq + ")"); set("sc_res", "scan sent – watch the letter tile above");
+};
+$("sc_live").onclick = () => {
+  if (!client){ set("cmdres", "Connect first."); return; }
+  scLive = !scLive; seq++;
+  client.publish("se14/robot/cmd", JSON.stringify({ cmd: "bcraw", v: scLive ? 1 : 0, seq }));
+  set("sc_live", "Live sensor: " + (scLive ? "on" : "off"));
+};
+
+$("rec_go").onclick = () => {
+  if (!client){ set("cmdres", "Connect first."); return; }
+  rec = { rows: [], ev: [], first: null, t0: new Date() };
+  seq++; client.publish("se14/robot/cmd", JSON.stringify({ cmd: "bcraw", v: 2, seq }));
+  set("rec_n", "recording… waiting for data");
+};
+$("rec_stop").onclick = () => {
+  if (client){ seq++; client.publish("se14/robot/cmd", JSON.stringify({ cmd: "bcraw", v: 0, seq })); }
+  scLive = false; set("sc_live", "Live sensor: off");
+  if (!rec || !rec.rows.length){ set("rec_n", "nothing recorded (robot connected? new firmware flashed?)"); rec = null; return; }
+  const evAt = new Map(); for (const [i, t] of rec.ev) evAt.set(i, (evAt.get(i) ? evAt.get(i) + "; " : "") + t);
+  const lines = ["sample,time_s,left,centre,right,left_is_bar,junction,old_rule_junction,event"];
+  for (const [i, l, c, r] of rec.rows){
+    lines.push([i, ((i - rec.first) * 0.005).toFixed(3), l & 127, c & 127, r & 127, (l & 128) ? 1 : 0, (c & 128) ? 1 : 0, (r & 128) ? 1 : 0,
+                '"' + (evAt.get(i) || "").replace(/"/g, "'") + '"'].join(","));
+  }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv" }));
+  a.download = "se14_run_" + rec.t0.toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  set("rec_n", "saved " + rec.rows.length + " samples (" + (rec.rows.length * 0.005).toFixed(1) + " s)");
+  rec = null;
 };
 
 function sendServo(deg){
@@ -606,6 +745,7 @@ function draw(){
   requestAnimationFrame(draw);
 }
 requestAnimationFrame(draw);
+drawWave();
 connect();
 </script>
 </body>

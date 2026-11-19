@@ -72,7 +72,18 @@ void s3_line_step(s3_line_t *l, const uint16_t raw[3], bool suppress_junction, s
     /* 2026-11-11: the barcodes lie BESIDE the line, under the barcode sensor. While one is
        being read ('suppress_junction' = barcode busy) and the centre is on the line, the
        bars are not the line: ignore that sensor so the robot does not swerve onto them. */
-    if (suppress_junction && (out->norm[1] > S3_BLACK_THRESHOLD)) out->norm[S3_BC_SENSOR_IDX] = 0;
+    /* 2026-11-18: the junction test below uses the REAL readings (jn). Zeroing the barcode
+       sensor also hid every cross-junction while the reader was busy (it starts on the
+       cross line itself, or on the track line brushing the left sensor): the robot read the
+       barcode but never saw the junction, so it never did the move. A barcode alone cannot
+       make all three black (its bars are beside the line, the right sensor stays white). */
+    int16_t jn[3] = { out->norm[0], out->norm[1], out->norm[2] };
+    /* 2026-11-18 (photo of the robot): the barcode sensor sits ~6 cm left of and ~3 cm behind
+       the centre/right pair. With the line under BOTH of the pair, black under the left
+       sensor is a barcode bar or the cross line of a junction, never "the line is to the
+       left": do not let it yank the steering left in the middle of a crossing. */
+    if ((suppress_junction || (out->norm[2] > S3_BLACK_THRESHOLD)) && (out->norm[1] > S3_BLACK_THRESHOLD))
+        out->norm[S3_BC_SENSOR_IDX] = 0;
     sum = (int32_t)out->norm[0] + out->norm[1] + out->norm[2];
     {
         int16_t mx = out->norm[0];
@@ -123,13 +134,13 @@ void s3_line_step(s3_line_t *l, const uint16_t raw[3], bool suppress_junction, s
         l->last_steer = (int8_t)s;
     }
     /* 4. junction = all three black for a few samples (ONE event per junction) */
-    if ((out->norm[0] > S3_BLACK_THRESHOLD) && (out->norm[1] > S3_BLACK_THRESHOLD) &&
-        (out->norm[2] > S3_BLACK_THRESHOLD)) {
+    if ((jn[0] > S3_BLACK_THRESHOLD) && (jn[1] > S3_BLACK_THRESHOLD) &&
+        (jn[2] > S3_BLACK_THRESHOLD)) {
         if (l->black_count < 255) l->black_count++;
         if ((l->black_count >= S3_JUNCTION_SAMPLES) && l->junction_armed) {
             l->junction_armed = false;
             /* only when it came in straight: on a bend the line crosses all three diagonally */
-            if (!suppress_junction && (l->straight_count >= S3_JUNC_STRAIGHT_SAMPLES)) out->events |= S3_LINE_EVT_JUNCTION;
+            if (l->straight_count >= S3_JUNC_STRAIGHT_SAMPLES) out->events |= S3_LINE_EVT_JUNCTION;
         }
     } else {
         l->black_count = 0;
@@ -147,4 +158,62 @@ void s3_line_step(s3_line_t *l, const uint16_t raw[3], bool suppress_junction, s
     out->centre_black = (out->norm[1] > S3_BLACK_THRESHOLD);
     out->any_black    = (out->norm[0] > S3_BLACK_THRESHOLD) || out->centre_black ||
                         (out->norm[2] > S3_BLACK_THRESHOLD);
+}
+
+/* ------------------------------------------------------------------------------------
+ * Junction from the LEFT (barcode) sensor, 2026-11-18.
+ * On our robot the left sensor is ~6 cm left of and ~3 cm behind the centre/right pair,
+ * so "all three black at once" never happens at a cross (the tape is only ~2 cm wide):
+ * the pair has left the cross line before the left sensor reaches it. Instead:
+ *   a cross line = ONE dark mark under the left sensor, 8..45 mm long (by the wheels),
+ *   with white before it (>= 25 mm) and after it (>= 35 mm), while the pair is on the
+ *   line and the robot was going straight. A barcode has many bars with narrow gaps,
+ *   so it never passes the white-before/after test.
+ * The event says how far the robot has already gone past the middle of the cross line,
+ * so the junction move can still put the wheel axle on the crossing.
+ * ------------------------------------------------------------------------------------ */
+void s3_jx_init(s3_jx_t *j)
+{
+    j->st = 0; j->have_white_end = false; j->white_end = 0; j->m0 = 0; j->m1 = 0; j->ok = false;
+}
+
+bool s3_jx_step(s3_jx_t *j, int16_t left, bool pair_on_line, bool straight, int32_t enc, int16_t *mm_past)
+{
+    const int32_t C = S3_JX_COUNTS_PER_10MM;                       /* counts per 10 mm */
+    int32_t d;
+    switch (j->st) {
+    case 0:                                                        /* white under the left sensor */
+        if (left > S3_JX_BLACK) {
+            /* white before it: long enough since the last dark mark (or none seen yet) */
+            d = enc - j->white_end; if (d < 0) d = -d;
+            j->ok = pair_on_line && straight && (!j->have_white_end || (d * 10 >= S3_JX_QUIET_BEFORE_MM * C));
+            j->m0 = enc; j->st = 1;
+        }
+        break;
+    case 1:                                                        /* over a dark mark */
+        if (!pair_on_line) j->ok = false;
+        d = enc - j->m0; if (d < 0) d = -d;
+        if (d * 10 > S3_JX_MAX_MM * C) j->ok = false;              /* too long: the line itself, not a cross line */
+        if (left < S3_JX_WHITE) {
+            j->m1 = enc; j->white_end = enc; j->have_white_end = true;
+            if (j->ok && (d * 10 >= S3_JX_MIN_MM * C)) j->st = 2; else j->st = 0;
+        }
+        break;
+    default:                                                       /* after a good mark: wait for white */
+        if (left > S3_JX_BLACK) {                                  /* another bar: a barcode, not a junction */
+            j->ok = false; j->m0 = enc; j->st = 1;                 /* follow this mark (it cannot count either) */
+            break;
+        }
+        j->white_end = enc;
+        d = enc - j->m1; if (d < 0) d = -d;
+        if (d * 10 >= S3_JX_QUIET_AFTER_MM * C) {
+            int32_t mid = j->m0 + (j->m1 - j->m0) / 2;
+            int32_t past = enc - mid; if (past < 0) past = -past;
+            *mm_past = (int16_t)((past * 10) / C);
+            j->st = 0;
+            return true;
+        }
+        break;
+    }
+    return false;
 }

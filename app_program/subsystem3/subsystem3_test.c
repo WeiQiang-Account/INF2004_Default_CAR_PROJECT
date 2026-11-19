@@ -30,11 +30,13 @@ EXPORT void subsystem3_test(void)
 	TEST_CHECK("S3-U02", s3_st_decode_rev(),    "barcodes read backwards decode the same character");
 	TEST_CHECK("S3-U03", s3_st_decode_reject(), "28 elements / flat widths / damaged code are rejected");
 	TEST_CHECK("S3-U04", s3_st_line_steer(),    "line position, steering sign, calibration range check");
-	TEST_CHECK("S3-U05", s3_st_line_events(),   "line lost in 8 samples (40 ms), found, junction once, no junction during a barcode");
+	TEST_CHECK("S3-U05", s3_st_line_events(),   "line lost in 8 samples (40 ms), found, junction once, junction still seen while a barcode is read");
 	TEST_CHECK("S3-U06", s3_st_bc_speeds(),     "edges -> command at 3 speeds, both ways, timer wrap, within 100 ms (FR15)");
 	TEST_CHECK("S3-U07", s3_st_bc_glitch(),     "spikes shorter than 1 ms inside the code are filtered");
-	TEST_CHECK("S3-U08", s3_st_bc_errors(),     "incomplete or damaged code -> error, lone black mark -> ignored");
+	TEST_CHECK("S3-U08", s3_st_bc_errors(),     "too short or damaged code -> error, lost stop bars -> * + letter read, lone mark ignored");
 	TEST_CHECK("S3-U09", s3_st_bc_cooldown(),   "same barcode not read twice inside 300 ms");
+	TEST_CHECK("S3-U13", s3_st_bc_analog(),     "blurred analog barcode (9 mm spot, 6 mm bars, 50 % dark) -> A-Z both ways, no wrong letter");
+	TEST_CHECK("S3-U14", s3_st_junction_left(), "junction from the left sensor: cross line once (+ mm past), not a barcode / the line / off the line / on a bend");
 
 #if S3_LIVE_TESTS
 	{

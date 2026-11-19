@@ -63,6 +63,8 @@ void s1_wifi_fault(bool lost)
 	else      { (void)tk_clr_flg(flg_fault, ~(UINT)FAULT_BIT_WIFI); }
 }
 
+LOCAL UB	s_bcraw;		/* stream to se14/robot/bcraw: 0 off, 1 barcode sensor, 2 all three (recorded run) */
+
 LOCAL BOOL robot_still(void)
 {
 	motion_status_t m;
@@ -113,7 +115,9 @@ void s1_snapshot_take(s1_snapshot_t *s)
 	s->j_act     = s5_junction_last_act();
 	s->j_ch      = s5_junction_last_char();
 	s->lost_ms   = s5_line_lost_ms();
+	s->cruise    = s5_cruise();
 	s->bar_count = s3_barcode_count();
+	s->bar_part = s3_barcode_partial();
 	s->bar_err   = s3_barcode_errors();
 
 	s->hump_mm      = (uint16_t)s4_hump_mm();
@@ -183,6 +187,30 @@ uint16_t s1_cmd_submit(const char *p, uint16_t len, char *reply, uint16_t size)
 			s5_set_barcode_map(m);		/* used from the next junction on */
 		}
 	}
+	if ((r == S1_OK) && (cmd == S1_CMD_STOP) && (s5_bcscan_active() != 0)) {
+		remote = S1_REMOTE_STOP;		/* STOP also ends a barcode test scan (robot is READY) */
+	}
+	if ((r == S1_OK) && (cmd == S1_CMD_BCSCAN)) {
+		int32_t d = 300, v = 50, back = 1;
+		(void)s1_cmd_int(p, len, "d", &d);
+		(void)s1_cmd_int(p, len, "v", &v);
+		(void)s1_cmd_int(p, len, "back", &back);
+		if (s5_bcscan_request((int)d, (int)v, (int)back) != 0) { r = S1_REJ_STATE; }
+		else if (s_bcraw == 0u) { s_bcraw = 1u; }	/* stream the sensor while it scans */
+	}
+	if ((r == S1_OK) && (cmd == S1_CMD_BCRAW)) {
+		int32_t v = 1;
+		(void)s1_cmd_int(p, len, "v", &v);
+		s_bcraw = (v == 2) ? 2u : ((v != 0) ? 1u : 0u);
+	}
+	if ((r == S1_OK) && (cmd == S1_CMD_SPEED)) {
+		int32_t v;
+		if (!s1_cmd_int(p, len, "v", &v) || (v < 40) || (v > 250)) {
+			r = S1_REJ_BAD_JSON;		/* "v" must be 40..250 mm/s */
+		} else {
+			s5_set_cruise((int)v);
+		}
+	}
 	if ((r == S1_OK) && (cmd == S1_CMD_SERVO)) {
 		int32_t deg;
 		if (!s1_cmd_int(p, len, "deg", &deg) || (deg < -1) || (deg > 180)) {
@@ -222,6 +250,24 @@ int s5_hook_remote_poll(void)
 	if ((ptn & S1_FLG_START(st)) != 0u) { return 1; }
 	tm_printf((UB*)"[S1] remote command dropped: VC state changed (now %s)\n", (UB*)s1_vc_state_name((uint8_t)st));
 	return 0;
+}
+
+/* barcode sensor stream on/off (dashboard barcode test page) */
+bool s1_bcraw_on(void) { return (s_bcraw != 0u) || (s5_bcscan_active() != 0); }
+bool s1_bcraw_all3(void) { return s_bcraw == 2u; }
+uint16_t s1_bcraw_get3(uint32_t *from, uint8_t *l, uint8_t *c, uint8_t *r, uint16_t max)
+{
+	UW f = (UW)*from;
+	INT n = s3_bcraw_get3(&f, (UB *)l, (UB *)c, (UB *)r, (INT)max);
+	*from = (uint32_t)f;
+	return (uint16_t)n;
+}
+uint16_t s1_bcraw_get(uint32_t *from, uint8_t *out, uint16_t max)
+{
+	UW f = (UW)*from;
+	INT n = s3_bcraw_get(&f, (UB *)out, (INT)max);
+	*from = (uint32_t)f;
+	return (uint16_t)n;
 }
 
 /* for subsystem1_test.c */

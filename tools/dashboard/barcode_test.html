@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SE14 Barcode Test</title>
+<!--
+  SE14 barcode test page. Same broker settings as dashboard.html (open it the same way).
+  The robot drives itself slowly and straight over a barcode ("Scan"), streams what its
+  barcode sensor sees, and shows the decoded letter. No line following, no junction moves.
+-->
+<style>
+:root{
+  --bg:#f4f6f8; --card:#ffffff; --ink:#18212b; --muted:#66727f; --line:#dde3e9;
+  --ok:#1f9d55; --okbg:#e3f6ea; --warn:#b7791f; --warnbg:#fdf3dc; --bad:#d63b3b; --badbg:#fde6e6;
+  --info:#2b6cb0; --infobg:#e3eefb; --idle:#6b7785; --idlebg:#eceff2; --accent:#2b6cb0; --track:#e8edf2;
+  --l:#2b6cb0; --r:#c05621;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#11161c; --card:#1a2129; --ink:#e6edf3; --muted:#93a1ae; --line:#2b3540;
+    --ok:#3fbf75; --okbg:#173325; --warn:#e0a83a; --warnbg:#3a2e14; --bad:#f06262; --badbg:#3d1c1c;
+    --info:#62a3ec; --infobg:#18293d; --idle:#93a1ae; --idlebg:#232c36; --accent:#62a3ec; --track:#2b3540;
+    --l:#62a3ec; --r:#ed8a4c;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;padding:12px 16px;background:var(--card);border-bottom:1px solid var(--line)}
+h1{font-size:17px;margin:0 8px 0 0}
+input,button,select{font:inherit;color:inherit}
+input{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:5px 8px;width:120px}
+button{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:7px 14px;cursor:pointer;font-weight:600}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button:disabled{opacity:.5;cursor:default}
+.pill{font-size:12px;padding:3px 9px;border-radius:999px;background:var(--idlebg);color:var(--idle);font-weight:600}
+.pill.ok{background:var(--okbg);color:var(--ok)} .pill.bad{background:var(--badbg);color:var(--bad)} .pill.warn{background:var(--warnbg);color:var(--warn)}
+main{max-width:1100px;margin:0 auto;padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;min-width:0}
+.card h2{font-size:13px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin:0 0 10px}
+.wide{grid-column:1/-1}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px}
+.kv div:nth-child(odd){color:var(--muted)} .kv div:nth-child(even){font-weight:600;text-align:right}
+.row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:10px}
+.row label{display:flex;flex-direction:column;font-size:12px;color:var(--muted);gap:2px}
+.letter{width:120px;height:120px;border-radius:14px;border:2px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:84px;font-weight:800;line-height:1;transition:background .3s,border-color .3s}
+.letter.fresh{background:var(--okbg);border-color:var(--ok);color:var(--ok)}
+.res{display:flex;gap:16px;align-items:center}
+.big{font-size:18px;font-weight:700}
+.hint{color:var(--muted);font-size:12px;margin-top:8px}
+canvas{width:100%;height:220px;display:block;background:var(--bg);border:1px solid var(--line);border-radius:6px}
+.barpic{display:flex;height:34px;border:1px solid var(--line);border-radius:4px;overflow:hidden;background:#fff;margin-top:6px}
+.barpic span{display:block;height:100%}
+.prog{height:10px;background:var(--track);border-radius:5px;overflow:hidden;margin-top:6px}
+.prog>span{display:block;height:100%;width:0;background:var(--accent);transition:width .15s}
+#log{font:12px/1.5 ui-monospace,Consolas,monospace;max-height:220px;overflow:auto}
+#log .ok{color:var(--ok)} #log .bad{color:var(--bad)} #log .warn{color:var(--warn)}
+ol{margin:6px 0 0 18px;padding:0} ol li{margin-bottom:4px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Barcode test</h1>
+  <span>Broker</span><input id="host" value="10.142.246.70"><input id="port" value="9001" style="width:70px">
+  <button id="connect">Connect</button>
+  <span class="pill" id="connpill">not connected</span>
+  <span class="pill" id="robotpill">robot: no data</span>
+</header>
+<main>
+  <section class="card">
+    <h2>Result</h2>
+    <div class="res">
+      <div class="letter" id="letter">–</div>
+      <div>
+        <div class="big" id="restext">nothing read yet</div>
+        <div class="hint" id="resage"></div>
+        <div style="margin-top:8px"><span id="progtxt">not reading</span><div class="prog"><span id="prog"></span></div></div>
+      </div>
+    </div>
+    <div class="kv" style="margin-top:12px">
+      <div>Robot state</div><div id="v_state">-</div>
+      <div>IR calibrated</div><div id="v_cal">-</div>
+      <div>Reads OK / failed</div><div id="v_cnt">-</div>
+      <div>Last failure</div><div id="v_why">-</div>
+      <div>Sensor edges</div><div id="v_edges">-</div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Scan</h2>
+    <div class="row">
+      <label>Distance (mm)<input id="sc_d" type="number" min="50" max="800" step="10" value="450"></label>
+      <label>Speed (mm/s)<input id="sc_v" type="number" min="20" max="150" step="5" value="50"></label>
+      <label>Return to start<select id="sc_back"><option value="1">yes</option><option value="0">no</option></select></label>
+    </div>
+    <p class="hint">Put the left sensor ~5 cm before the first bar. Distance must take the sensor fully past the last bar: barcode length + 10 cm (a 30 cm barcode needs 450 mm). If the scan stops on the barcode, the read cannot finish.</p>
+    <div class="row">
+      <button class="primary" id="scan">Scan barcode</button>
+      <button id="stop">Stop</button>
+      <button id="reset">Reset FAULT</button>
+      <button id="live">Live sensor: off</button>
+    </div>
+    <div class="hint" id="cmdres">Connect, then press Scan.</div>
+    <ol class="hint">
+      <li>Robot in <b>READY</b> (IR calibration done). If it says FAULT, press Reset FAULT.</li>
+      <li>Put it on the floor, pointing along the barcode, about 5 cm <b>before</b> it, with the barcode under the <b>left</b> sensor.</li>
+      <li>Press <b>Scan barcode</b>: it drives straight over the barcode slowly, then back to where it started. Change the barcode or the speed and press Scan again.</li>
+    </ol>
+  </section>
+
+  <section class="card wide">
+    <h2>What the barcode sensor sees (last 6 s)</h2>
+    <canvas id="cv" width="1060" height="220"></canvas>
+    <div class="hint">Line = how dark the left sensor reads (0 = white, 100 = black). Shaded = counted as a <b>bar</b>. A good pass shows 15 shaded blocks (bars) with clear white between them. Thin bars that never reach high, or gaps that never drop, are the sensor blurring: lower it / point it straight down.</div>
+  </section>
+
+  <section class="card wide">
+    <h2>Last failed read, as the robot measured it</h2>
+    <div class="barpic" id="failpic"></div>
+    <div class="hint" id="failtxt">No failed read yet. A good barcode is 29 bars + gaps, wide ≈ 2–3× narrow.</div>
+  </section>
+
+  <section class="card wide">
+    <h2>Log</h2>
+    <div id="log"></div>
+  </section>
+</main>
+<script>
+"use strict";
+const enc = new TextEncoder(), dec = new TextDecoder();
+function str(s){ const b = enc.encode(s); return [b.length >> 8, b.length & 255, ...b]; }
+function packet(type, body){
+  const out = [type]; let n = body.length;
+  do { let d = n % 128; n = Math.floor(n / 128); if (n > 0) d |= 128; out.push(d); } while (n > 0);
+  return new Uint8Array([...out, ...body]);
+}
+class Mqtt {
+  constructor(url, handlers){
+    this.h = handlers; this.buf = new Uint8Array(0); this.id = 1;
+    this.ws = new WebSocket(url, "mqtt"); this.ws.binaryType = "arraybuffer";
+    this.ws.onopen = () => {
+      const cid = "se14-dash-" + Math.random().toString(16).slice(2, 8);
+      this.ws.send(packet(0x10, [...str("MQTT"), 4, 0x02, 0, 30, ...str(cid)]));
+    };
+    this.ws.onmessage = e => this.feed(new Uint8Array(e.data));
+    this.ws.onclose = () => { clearInterval(this.ping); this.h.onClose(); };
+    this.ws.onerror = () => {};
+  }
+  feed(chunk){
+    const b = new Uint8Array(this.buf.length + chunk.length); b.set(this.buf); b.set(chunk, this.buf.length); this.buf = b;
+    for(;;){
+      if (this.buf.length < 2) return;
+      let len = 0, mul = 1, i = 1, d;
+      do { if (i >= this.buf.length) return; d = this.buf[i++]; len += (d & 127) * mul; mul *= 128; } while (d & 128);
+      if (this.buf.length < i + len) return;
+      this.handle(this.buf[0], this.buf.subarray(i, i + len));
+      this.buf = this.buf.slice(i + len);
+    }
+  }
+  handle(h, p){
+    const type = h >> 4;
+    if (type === 2){                                   /* CONNACK */
+      if (p[1] === 0){ this.ping = setInterval(() => this.ws.send(new Uint8Array([0xC0, 0])), 15000); this.h.onConnect(); }
+      else this.h.onError("broker refused the connection (code " + p[1] + ")");
+    } else if (type === 3){                            /* PUBLISH */
+      const qos = (h >> 1) & 3, tl = (p[0] << 8) | p[1];
+      const topic = dec.decode(p.subarray(2, 2 + tl)); let o = 2 + tl;
+      if (qos > 0){ this.ws.send(new Uint8Array([0x40, 2, p[o], p[o + 1]])); o += 2; }
+      this.h.onMessage(topic, dec.decode(p.subarray(o)));
+    }
+  }
+  subscribe(topic){ const id = this.id++; this.ws.send(packet(0x82, [id >> 8, id & 255, ...str(topic), 0])); }
+  publish(topic, text){ this.ws.send(packet(0x30, [...str(topic), ...enc.encode(text)])); }
+  close(){ try { this.ws.close(); } catch(e){} }
+}
+
+
+const $ = id => document.getElementById(id);
+const set = (id, v) => { $(id).textContent = v; };
+const store = { get(k, d){ try { return localStorage.getItem(k) ?? d; } catch(e){ return d; } },
+                set(k, v){ try { localStorage.setItem(k, v); } catch(e){} } };
+$("host").value = store.get("se14.host", $("host").value);
+$("port").value = store.get("se14.port", $("port").value);
+$("sc_d").value = store.get("se14.scd2", "450"); $("sc_v").value = store.get("se14.scv", "50");
+
+const BCWHY = { 0:"-", 1:"wrong number of bars (missed / merged some)", 2:"wide and narrow bars look the same", 3:"not a Code 39 character",
+  4:"no * start/stop, or a gap too wide", 10:"missed an edge", 11:"too many bars", 12:"started but never finished" };
+let client = null, lastMsg = 0, lastOk = null, okAt = 0, live = false;
+const SAMPLES = 1200;                       /* 6 s at 5 ms */
+let samp = new Uint8Array(SAMPLES), sampN = 0, lastIdx = null;
+
+function pill(id, text, cls){ $(id).textContent = text; $(id).className = "pill " + (cls || ""); }
+function logLine(t, cls){ const d = document.createElement("div"); d.className = cls || ""; d.textContent = new Date().toLocaleTimeString() + "  " + t; $("log").prepend(d); while ($("log").children.length > 150) $("log").lastChild.remove(); }
+
+function pushSamples(first, arr){
+  if (lastIdx !== null && first > lastIdx){             /* gap (lost message): pad with "no data" */
+    const gap = Math.min(first - lastIdx, 200); for (let i = 0; i < gap; i++) add(255);
+  }
+  for (const v of arr) add(v);
+  lastIdx = first + arr.length;
+  draw();
+}
+function add(v){ if (sampN < SAMPLES) samp[sampN++] = v; else { samp.copyWithin(0, 1); samp[SAMPLES - 1] = v; } }
+function draw(){
+  const c = $("cv"), g = c.getContext("2d"), W = c.width, H = c.height, css = getComputedStyle(document.documentElement);
+  g.clearRect(0, 0, W, H);
+  const x0 = W - sampN * W / SAMPLES, dx = W / SAMPLES;
+  g.fillStyle = css.getPropertyValue("--okbg").trim() || "#dfd";
+  for (let i = 0; i < sampN; i++) if (samp[i] !== 255 && (samp[i] & 128)) g.fillRect(x0 + i * dx, 0, dx + 0.6, H);
+  g.strokeStyle = css.getPropertyValue("--line").trim(); g.lineWidth = 1;
+  for (const p of [0.25, 0.5, 0.75]){ g.beginPath(); g.moveTo(0, H * p); g.lineTo(W, H * p); g.stroke(); }
+  g.strokeStyle = css.getPropertyValue("--accent").trim(); g.lineWidth = 2; g.beginPath(); let pen = false;
+  for (let i = 0; i < sampN; i++){
+    if (samp[i] === 255){ pen = false; continue; }
+    const y = H - 6 - (samp[i] & 127) / 100 * (H - 12), x = x0 + i * dx;
+    if (!pen){ g.moveTo(x, y); pen = true; } else g.lineTo(x, y);
+  }
+  g.stroke();
+  g.fillStyle = css.getPropertyValue("--muted").trim(); g.font = "11px system-ui";
+  g.fillText("black 100", 4, 12); g.fillText("white 0", 4, H - 4);
+}
+
+function onTelemetry(t){
+  pill("robotpill", "robot: live", "ok");
+  set("v_state", t.state); set("v_cal", t.ir_cal ? "yes" : "NO – sweep over black and white");
+  if (t.bc_ok !== undefined){
+    if (lastOk !== null && t.bc_ok !== lastOk) okAt = Date.now();
+    lastOk = t.bc_ok;
+    set("letter", t.bar ? (t.bar === " " ? "␣" : t.bar) : "–");
+    set("restext", t.bar ? ("Read: " + t.bar) : "nothing read yet");
+    set("v_cnt", t.bc_ok + " / " + t.bc_err + (t.bc_pt ? "  (" + t.bc_pt + " from * + letter only)" : ""));
+    set("v_why", t.bc_err ? (BCWHY[t.bc_why] ?? t.bc_why) : "-");
+    set("v_edges", t.bc_edges);
+    const n = t.bc_n || 0;
+    set("progtxt", n > 0 ? ("reading… " + n + " / 29") : "not reading");
+    $("prog").style.width = (n * 100 / 29) + "%";
+  }
+  $("letter").classList.toggle("fresh", Date.now() - okAt < 3000);
+}
+function onEvent(e){
+  if (e.ev === "barcode"){ logLine("READ: " + e.ch, "ok"); okAt = Date.now(); }
+  else if (e.ev === "barcode_error"){
+    logLine("failed: " + (BCWHY[e.why] ?? e.why) + (e.n !== undefined ? " (saw " + e.n + " of 29)" : ""), "warn");
+    if (e.w){
+      const p = $("failpic"); p.innerHTML = ""; const tot = e.w.reduce((a, b) => a + b, 0) || 1;
+      e.w.forEach((x, i) => { const s = document.createElement("span"); s.style.width = (x * 100 / tot) + "%"; s.style.background = i % 2 ? "#fff" : "#111"; p.appendChild(s); });
+      const mm = e.u === "mm10", f = x => mm ? (x / 10).toFixed(1) : String(x), un = mm ? "mm" : "ms";
+      const bars = e.w.filter((_, i) => i % 2 === 0), gaps = e.w.filter((_, i) => i % 2 === 1);
+      const r = a => a.length ? f(Math.min(...a)) + "–" + f(Math.max(...a)) + " " + un : "-";
+      set("failtxt", "Saw " + e.n + " of 29. Bars " + r(bars) + ", gaps " + r(gaps) + ". Widths (" + un + "): " + e.w.map(f).join(" "));
+    }
+  }
+  else if (e.ev === "cmd_accepted"){ set("cmdres", "✓ " + e.cmd + " accepted"); }
+  else if (e.ev === "cmd_rejected"){ set("cmdres", "✗ " + e.cmd + " rejected: " + ({not_allowed_now:"robot must be READY (finish the IR calibration, or press Reset FAULT)", bad_json:"bad values", old_seq:"old sequence number"}[e.reason] ?? e.reason)); }
+  else if (e.ev === "state"){ logLine("state " + e.from + " → " + e.to + (e.why ? ": " + e.why : ""), e.to === "FAULT" ? "bad" : ""); }
+}
+function onMessage(topic, text){
+  lastMsg = Date.now();
+  try {
+    if (topic === "se14/robot/status" || topic === "se14/robot/debug") return;
+    const j = JSON.parse(text);
+    if (topic === "se14/robot/telemetry") onTelemetry(j);
+    else if (topic === "se14/robot/event") onEvent(j);
+    else if (topic === "se14/robot/bcraw") pushSamples(j.i, j.s);
+  } catch(e){}
+}
+function connect(){
+  if (client){ client.close(); client = null; }
+  const host = $("host").value.trim(), port = $("port").value.trim();
+  store.set("se14.host", host); store.set("se14.port", port);
+  pill("connpill", "connecting…", "warn");
+  client = new Mqtt("ws://" + host + ":" + port, {
+    onConnect(){ pill("connpill", "broker connected", "ok"); client.subscribe("se14/robot/#"); },
+    onMessage,
+    onError(m){ pill("connpill", m, "bad"); },
+    onClose(){ pill("connpill", "not connected", "bad"); setTimeout(() => { if (client) connect(); }, 3000); }
+  });
+}
+$("connect").onclick = connect;
+let seq = Math.floor(Date.now() / 1000) - 1700000000;
+function send(o, what){
+  if (!client){ set("cmdres", "Connect first."); return; }
+  seq++; o.seq = seq; client.publish("se14/robot/cmd", JSON.stringify(o)); set("cmdres", "Sent " + what + "…");
+}
+$("scan").onclick = () => {
+  const d = parseInt($("sc_d").value, 10), v = parseInt($("sc_v").value, 10);
+  if (!(d >= 50 && d <= 800 && v >= 20 && v <= 150)){ set("cmdres", "Distance 50–800 mm, speed 20–150 mm/s."); return; }
+  store.set("se14.scd2", String(d)); store.set("se14.scv", String(v));
+  send({ cmd: "bcscan", d: d, v: v, back: parseInt($("sc_back").value, 10) }, "scan " + d + " mm at " + v + " mm/s");
+};
+$("stop").onclick  = () => send({ cmd: "stop" }, "stop");
+$("reset").onclick = () => send({ cmd: "reset" }, "reset");
+$("live").onclick  = () => { live = !live; send({ cmd: "bcraw", v: live ? 1 : 0 }, "live sensor " + (live ? "on" : "off")); set("live", "Live sensor: " + (live ? "on" : "off")); };
+setInterval(() => { if (lastMsg && Date.now() - lastMsg > 3000) pill("robotpill", "robot: silent", "bad");
+  $("letter").classList.toggle("fresh", Date.now() - okAt < 3000);
+  if (okAt) set("resage", "read " + Math.round((Date.now() - okAt) / 1000) + " s ago"); }, 1000);
+draw();
+connect();
+</script>
+</body>
+</html>

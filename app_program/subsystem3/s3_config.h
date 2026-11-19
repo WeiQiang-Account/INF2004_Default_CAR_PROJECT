@@ -65,11 +65,20 @@
                                      broke off within a few bars (153 edges, 0 reads, 0 failures).
                                      0 = old GP7 edge interrupt.                                        */
 #endif
-#define S3_BC_ADC_SWING     120   /* normalised 0..1000: a bar starts when the reading rises this much above
-                                     the last white low, and ends when it falls this much below the bar's
-                                     peak (peak/valley follower). 2026-11-11: fixed 55 %/35 % thresholds missed
-                                     thin bars and thin gaps (the sensor spot is wider than a narrow bar). */
-#define S3_BC_ADC_MIN_BLACK 250   /* ... and a bar must reach at least this (white floor noise is not a bar) */
+/* Analog barcode sensor -> edges (s3_barcode.c, s3_bcadc_step). 0..1000 = white..black.
+ * 2026-11-11: fixed 55 %/35 % thresholds missed thin bars -> peak/valley follower (swing 120).
+ * 2026-11-18: thin bars still missed (only ~40-50 % dark on our robot, the spot is wider
+ * than a narrow bar): the swing now follows THIS barcode's contrast and the noise, a run
+ * may start at 150, and each edge is placed halfway between its peak and low.
+ * Simulated (blurred sensor, noise, 26 letters x 2 directions): narrow bar 6 mm with a
+ * 9 mm spot 0 % -> 99 %, no wrong letters.                                              */
+#define S3_BC_ADC_SWING      40   /* step that counts as a new bar/gap before the contrast is known (max) */
+#define S3_BC_ADC_SWING_MIN  20   /* never smaller (noise)                                          */
+#define S3_BC_ADC_SWING_PCT   8   /* % of the barcode's contrast (darkest bar - whitest gap)         */
+#define S3_BC_ADC_NOISE_K    16   /* and at least 16/4 = 4 x the sample-to-sample noise               */
+#define S3_BC_ADC_MIN_BLACK 150   /* the FIRST bar of a barcode must reach this (floor noise is not a bar) */
+#define S3_BC_ADC_ACTIVE    240   /* 1.2 s after the last bar/gap still counts as the same barcode     */
+#define S3_BC_ADC_SETTLE     20   /* 100 ms of steady white = quiet zone: place the last edge           */
 #ifndef S3_SIDE_SEEN
 #define S3_SIDE_SEEN        250   /* a side sensor this dark = "the line went to that side" */
 #endif
@@ -93,6 +102,34 @@
 
 /* ---- Barcode (Code 39 "*X*" = 3 characters) ------------------------------- */
 #define S3_BC_ELEMENTS       29   /* 3 chars x 9 elements + 2 gaps               */
+#ifndef S3_BC_PARTIAL
+#define S3_BC_PARTIAL         1   /* 2026-11-18: accept start '*' + letter when the last bars are lost */
+#endif
+#ifndef S3_JUNC_FROM_LEFT
+#define S3_JUNC_FROM_LEFT     1   /* 2026-11-18: junction = lone cross line under the LEFT sensor (it sits
+                                     ~3 cm behind the pair: "all 3 black at once" never happens). 0 = old rule */
+#endif
+#define S3_JX_BLACK         650   /* left sensor: dark mark starts (0..1000)                        */
+#define S3_JX_WHITE         350   /* ... and ends                                                    */
+#define S3_JX_MIN_MM          8   /* cross line under the left sensor: at least this long            */
+#define S3_JX_MAX_MM         45   /* ... at most (longer = the track line itself)                    */
+#define S3_JX_QUIET_BEFORE_MM 25  /* white before it (barcode gaps are shorter)                      */
+#define S3_JX_QUIET_AFTER_MM  35  /* white after it, then the junction is reported                    */
+#define S3_JX_COUNTS_PER_10MM 121 /* encoder counts per 10 mm (12.08 / mm)                           */
+#define S3_BC_BUSY_ELEM       3   /* reader counts as busy (line task) after bar, gap, bar */
+#define S3_BC_PARTIAL_ELEMENTS 20 /* '*' + gap + letter + gap                    */
+#ifndef S3_BC_FIT
+#define S3_BC_FIT             1   /* 2026-11-18: best-fit decode when the normal decode fails (blur) */
+#endif
+#define S3_FIT_KNOWN_ERR  0.12f   /* the start/stop star and gaps: mean squared error / D^2 per element, at most */
+#define S3_FIT_MAX_ERR     2.5f   /* best letter: squared error / D^2 over its 9 elements, at most  */
+#define S3_FIT_MARGIN      2.0f   /* the next best letter must fit at least this much worse          */
+#define S3_FIT_MARGIN_PART 3.0f   /* ... when the stop '*' is not all there                         */
+#define S3_FIT_MIN_GAP     0.8f   /* ... and be at least this far off (/ D^2)                         */
+#define S3_BC_QUIET_ENC_MIN  240  /* distance quiet zone: at least ~20 mm of white (encoder counts) */
+#define S3_BC_LOST_ENC       720  /* distance: no edge for ~60 mm -> the read is over */
+#define S3_BC_MAX_ELEM       41   /* 2026-11-11: keep up to this many, then look for the 29 that decode
+                                     (a stray mark before / after the barcode no longer spoils the read) */
 #ifndef S3_GLITCH_US
 #define S3_GLITCH_US       1000   /* pulses shorter than this are noise (bench: DO chatters ~200 us) */
 #endif

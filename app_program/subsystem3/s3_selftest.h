@@ -14,6 +14,8 @@ int s3_st_line_events(void);     /* lost in 8 samples (40 ms), found, junction o
 int s3_st_bc_speeds(void);       /* edges -> command at 3 speeds, both directions, 1 event, wrap-safe, fast */
 int s3_st_bc_glitch(void);       /* short spikes inside the code are filtered out                 */
 int s3_st_bc_errors(void);       /* incomplete code -> error, lone black mark -> nothing          */
+int s3_st_junction_left(void);   /* junction = lone cross line under the left sensor, not a barcode / line */
+int s3_st_bc_analog(void);       /* blurred analog barcode (9 mm spot, 6 mm bars) -> right letter, A-Z both ways */
 int s3_st_bc_cooldown(void);     /* the same barcode is not read twice                            */
 
 #endif

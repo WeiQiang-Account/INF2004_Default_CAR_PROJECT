@@ -87,8 +87,8 @@ static const char *motion_name(uint8_t m)
 }
 const char *s1_cmd_name(s1_cmd_t c)
 {
-	static const char *const n[] = { "none", "start", "stop", "resume", "cancel", "reset", "servo", "map" };
-	return ((unsigned)c < 8u) ? n[c] : "?";
+	static const char *const n[] = { "none", "start", "stop", "resume", "cancel", "reset", "servo", "map", "speed", "bcscan", "bcraw" };
+	return ((unsigned)c < 11u) ? n[c] : "?";
 }
 const char *s1_rej_name(s1_rej_t r)
 {
@@ -123,6 +123,7 @@ uint16_t s1_json_telemetry(char *buf, uint16_t size, const s1_snapshot_t *s)
 	key(&w, "map"); put_c(&w, '"'); { int i; for (i = 0; i < 4; i++) { put_ch(&w, s->map[i] ? s->map[i] : '-'); } } put_c(&w, '"');
 	kv_u(&w, "bc_edges", s->bar_edges);
 	kv_u(&w, "bc_ok", s->bar_count);
+	kv_u(&w, "bc_pt", s->bar_part);
 	kv_u(&w, "bc_err", s->bar_err);
 	kv_u(&w, "bc_why", s->bar_why);
 	kv_u(&w, "bc_n", s->bar_n);                 /* reading now: bars/gaps so far of 29 */
@@ -132,6 +133,7 @@ uint16_t s1_json_telemetry(char *buf, uint16_t size, const s1_snapshot_t *s)
 	kv_ch(&w, "j_ch", s->j_ch);
 	kv_b(&w, "lost", s->line_lost != 0u);
 	kv_u(&w, "lost_ms", s->lost_ms);
+	kv_u(&w, "cruise", s->cruise);
 	kv_u(&w, "hump_mm", s->hump_mm);
 	kv_u(&w, "hump_max_mm", s->hump_max_mm);
 	kv_i(&w, "pitch", s->pitch_x10);               /* 0.1 deg */
@@ -160,6 +162,38 @@ uint16_t s1_json_telemetry(char *buf, uint16_t size, const s1_snapshot_t *s)
 	kv_i(&w, "servo", s->servo_deg);
 	kv_b(&w, "servo_man", s->servo_manual != 0u);
 	kv_u(&w, "fault", s->faults);
+	return end(&w);
+}
+
+uint16_t s1_json_bcraw(char *buf, uint16_t size, uint32_t t_ms, uint32_t first, const uint8_t *s, uint16_t n)
+{
+	w_t w;
+	uint16_t i;
+	begin(&w, buf, size);
+	kv_u(&w, "t", t_ms);
+	kv_u(&w, "i", first);
+	key(&w, "s"); put_c(&w, '[');
+	for (i = 0; i < n; i++) { if (i > 0u) { put_c(&w, ','); } put_u(&w, s[i]); }
+	put_c(&w, ']');
+	return end(&w);
+}
+
+uint16_t s1_json_bcraw3(char *buf, uint16_t size, uint32_t t_ms, uint32_t first, const uint8_t *s, const uint8_t *c, const uint8_t *r, uint16_t n)
+{
+	w_t w;
+	uint16_t i;
+	begin(&w, buf, size);
+	kv_u(&w, "t", t_ms);
+	kv_u(&w, "i", first);
+	key(&w, "s"); put_c(&w, '[');
+	for (i = 0; i < n; i++) { if (i > 0u) { put_c(&w, ','); } put_u(&w, s[i]); }
+	put_c(&w, ']');
+	key(&w, "c"); put_c(&w, '[');
+	for (i = 0; i < n; i++) { if (i > 0u) { put_c(&w, ','); } put_u(&w, c[i]); }
+	put_c(&w, ']');
+	key(&w, "r"); put_c(&w, '[');
+	for (i = 0; i < n; i++) { if (i > 0u) { put_c(&w, ','); } put_u(&w, r[i]); }
+	put_c(&w, ']');
 	return end(&w);
 }
 
@@ -357,7 +391,7 @@ s1_rej_t s1_cmd_parse(const char *p, uint16_t len, s1_cmd_t *cmd, uint32_t *seq)
 	uint16_t n;
 	uint32_t v = 0;
 	bool digit = false;
-	static const char *const names[] = { "start", "stop", "resume", "cancel", "reset", "servo", "map" };
+	static const char *const names[] = { "start", "stop", "resume", "cancel", "reset", "servo", "map", "speed", "bcscan", "bcraw" };
 	unsigned c;
 
 	*cmd = S1_CMD_NONE;
@@ -383,7 +417,7 @@ s1_rej_t s1_cmd_parse(const char *p, uint16_t len, s1_cmd_t *cmd, uint32_t *seq)
 
 	{
 		int k = find_key(p, len, "cmd") + 1;                  /* first character of the word */
-		for (c = 0; c < 7u; c++) {
+		for (c = 0; c < 10u; c++) {
 			if (word_is(&p[k], n, names[c])) {
 				*cmd = (s1_cmd_t)(c + 1u);
 				*seq = v;
@@ -461,6 +495,11 @@ s1_rej_t s1_cmd_check(s1_cmd_t cmd, uint8_t st, bool still, uint8_t *remote)
 		/* test tool only: the scan needs the servo while the robot drives */
 		if (st == S1_VC_RUNNING) { return S1_REJ_STATE; }
 		break;
+	case S1_CMD_BCSCAN:                            /* barcode test drive: only when not on a mission */
+		if ((st != S1_VC_READY) && (st != S1_VC_COMPLETE)) { return S1_REJ_STATE; }
+		break;
+	case S1_CMD_BCRAW:
+	case S1_CMD_SPEED:                             /* any state: used from now on */
 	case S1_CMD_MAP:
 		/* allowed in any state except while driving through a junction would be odd but harmless:
 		   the new map is used from the next junction on */

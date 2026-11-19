@@ -35,7 +35,9 @@ typedef struct {
 	uint8_t  j_act;                                  /* movement at the last junction      */
 	char     j_ch;                                   /* character used there, 0 none       */
 	uint16_t lost_ms;                                /* VC line-lost timer (FAULT at 3000) */
+	uint16_t cruise;                                 /* line-following speed set, mm/s     */
 	uint32_t bar_count, bar_err;
+	uint32_t bar_part;		/* good reads that used the start * + letter only */
 	uint16_t hump_mm, hump_last_mm, hump_max_mm, humps;   /* S4                */
 	int16_t  pitch_x10, yaw_dps;
 	uint8_t  es_why;                                 /* last IMU E-stop: 1 impact 2 tilt 3 both */
@@ -78,7 +80,10 @@ uint16_t s1_json_cmd_result(char *buf, uint16_t size, uint32_t t_ms, const char 
 typedef enum { S1_CMD_NONE = 0, S1_CMD_START, S1_CMD_STOP, S1_CMD_RESUME, S1_CMD_CANCEL, S1_CMD_RESET,
                S1_CMD_SERVO /* {"cmd":"servo","deg":0..180 or -1,"seq":N}: dashboard test */,
                S1_CMD_MAP   /* {"cmd":"map","m":"FULR","seq":N}: barcode characters for Forward,
-                               U-turn, Left, Right (2026-11-11 demo: sent from the PC, not hard-coded) */ } s1_cmd_t;
+                               U-turn, Left, Right (2026-11-11 demo: sent from the PC, not hard-coded) */,
+               S1_CMD_SPEED /* {"cmd":"speed","v":40..250,"seq":N}: line-following speed, mm/s */,
+               S1_CMD_BCSCAN /* {"cmd":"bcscan","d":mm,"v":mm/s,"back":0/1,"seq":N}: barcode test drive */,
+               S1_CMD_BCRAW  /* {"cmd":"bcraw","v":0/1,"seq":N}: stream the barcode sensor (se14/robot/bcraw) */ } s1_cmd_t;
 typedef enum {
 	S1_OK = 0,
 	S1_REJ_TOO_LONG,        /* payload > 64 bytes            */
@@ -113,6 +118,11 @@ const char *s1_act_name(uint8_t a);   /* S5_JA_*: "none" "forward" "uturn" "left
  * *remote = what to give the VC (S1_REMOTE_*).                               */
 s1_rej_t    s1_cmd_check(s1_cmd_t cmd, uint8_t vc_state, bool robot_still, uint8_t *remote);
 const char *s1_cmd_name(s1_cmd_t c);
+/* {"t":ms,"i":index of the first sample,"s":[...]}: barcode sensor, 5 ms per sample,
+   0..100 = dark %, +128 = the reader counts it as a bar */
+uint16_t    s1_json_bcraw(char *buf, uint16_t size, uint32_t t_ms, uint32_t first, const uint8_t *s, uint16_t n);
+/* recorded run: "s" left, "c" centre, "r" right (0..100, +128 flags, see task_line_follow.c) */
+uint16_t    s1_json_bcraw3(char *buf, uint16_t size, uint32_t t_ms, uint32_t first, const uint8_t *s, const uint8_t *c, const uint8_t *r, uint16_t n);
 const char *s1_rej_name(s1_rej_t r);
 const char *s1_vc_state_name(uint8_t st);
 

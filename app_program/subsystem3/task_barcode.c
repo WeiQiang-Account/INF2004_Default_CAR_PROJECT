@@ -12,6 +12,7 @@
 
 #include "subsystem3.h"
 #include "drv_ir.h"
+#include "../subsystem2/drv_encoder.h"		/* encoder_read(): distance quiet zone */
 #include "../subsystem5/vc_events.h"		/* vc_post(), VC_EV_* */
 
 LOCAL s3_bc_t		bc;
@@ -42,6 +43,7 @@ INT  s3_barcode_fail_widths(UB *out, INT max, UB *mm10)
 }
 UW   s3_barcode_errors(void)     { return err_count; }
 UW   s3_barcode_count(void)      { return ok_count; }
+UW   s3_barcode_partial(void)    { return bc.partial_count; }	/* reads that used '*' + letter only */
 
 
 LOCAL void report(const s3_bc_ev_t *ev)
@@ -87,14 +89,22 @@ EXPORT void barcode_task(INT stacd, void *exinf)
 #else
 		while (ir_edge_pop(&e)) {
 #endif
+#if S3_BC_FROM_ADC
+			if (e.level == S3_BC_LEVEL_ABORT) { s3_bc_abort(&bc); continue; }	/* track line under the sensor */
+#endif
 			s3_bc_edge(&bc, e.t_us, e.enc, e.level, &ev);
 			report(&ev);
 		}
 		/* 2. glitch window, quiet zone, timeouts */
+		{ int32_t l, r; encoder_read(&l, &r); bc.now_enc = (l + r) / 2; bc.have_now_enc = true; }
 		s3_bc_poll(&bc, ir_time_us(), &ev);
 		report(&ev);
 
-		busy_flag = s3_bc_busy(&bc) ? 1 : 0;
+		/* 2026-11-18: "busy" (line task: ignore the barcode sensor, no junction) only once this
+		   really looks like a barcode (bar, gap, bar...). The left sensor also brushes the
+		   track line on bends and crosses it at every junction: one or two marks must not hide
+		   a junction for the next 60 mm. */
+		busy_flag = ((bc.state == S3_BC_READING) && (bc.n_elem >= S3_BC_BUSY_ELEM)) ? 1 : 0;
 		prog_n    = (bc.state == S3_BC_READING) ? (UB)bc.n_elem : 0u;
 	}
 }

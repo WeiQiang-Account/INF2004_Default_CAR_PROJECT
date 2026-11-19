@@ -6,6 +6,9 @@
 #if defined(S3_HOST_TEST) || (defined(APP_TEST) && APP_TEST)
 
 #include "s3_logic.h"
+#ifdef S3_HOST_TEST
+#include <stdio.h>
+#endif
 #include "s3_selftest.h"
 
 /* ---------------------------------------------------------------- helpers */
@@ -257,9 +260,21 @@ int s3_st_line_events(void)
     for (int i = 0; i < 10; i++) { set3(r, 1000, 1000, 1000); s3_line_step(&l, r, false, &o); if (o.events & S3_LINE_EVT_JUNCTION) junc++; }
     if (junc != 1) ok = 0;
 
-    set3(r, 0, 1000, 0); s3_line_step(&l, r, false, &o);             /* a barcode is being read: no junction event */
+    /* 2026-11-18: the barcode reader is busy (it starts on the cross line itself): the
+       junction must STILL be seen, once (it used to be hidden -> no junction move) */
+    set3(r, 0, 1000, 0); s3_line_step(&l, r, true, &o);
     junc = 0;
     for (int i = 0; i < 10; i++) { set3(r, 1000, 1000, 1000); s3_line_step(&l, r, true, &o); if (o.events & S3_LINE_EVT_JUNCTION) junc++; }
+    if (junc != 1) ok = 0;
+    /* ... but bars beside the line under the left sensor (right sensor white) are no junction,
+       and while reading they do not pull the steering onto the bars */
+    for (int i = 0; i < S3_JUNC_STRAIGHT_SAMPLES + 2; i++) { set3(r, 0, 1000, 0); s3_line_step(&l, r, true, &o); }
+    junc = 0;
+    for (int i = 0; i < 10; i++) {
+        set3(r, 1000, 1000, 0); s3_line_step(&l, r, true, &o);
+        if (o.events & S3_LINE_EVT_JUNCTION) junc++;
+        if (o.pos != 0) ok = 0;
+    }
     if (junc != 0) ok = 0;
     return ok;
 }
@@ -375,16 +390,29 @@ int s3_st_bc_errors(void)
     int ok = 1;
     st_result_t r;
 
-    /* (a) the last bar never ends: only 28 edges. Must end in ONE error, never a command */
+    /* (a) the read stops after 15 elements (start '*' + part of the letter):
+       must end in ONE error, never a command */
     make_widths(2, 25000u, 30, 0, widths);
     edges_from_widths(widths, 1000000u, edges);
     s3_bc_init(&bc);
-    r = run(&bc, edges, 29, 3000000u);
+    r = run(&bc, edges, 16, 3000000u);
     if (r.cmds != 0 || r.errors != 1 || r.first_value != S3_BC_ERR_TIMEOUT) ok = 0;
 
-    /* (b) a damaged character: error, never a command */
+    /* (a2) 2026-11-18: the last bar never ends (28 edges). The start '*' + letter are whole,
+       so the letter is still read (partial read), with no error */
+    s3_bc_init(&bc);
+    r = run(&bc, edges, 29, 3000000u);
+#if S3_BC_PARTIAL
+    if (r.cmds != 1 || r.errors != 0 || !bc.last_partial) ok = 0;
+#else
+    if (r.cmds != 0 || r.errors != 1 || r.first_value != S3_BC_ERR_TIMEOUT) ok = 0;
+#endif
+
+    /* (b) a damaged LETTER (two narrow elements printed wide: 5 wide of 9): error, never a
+       command. (2026-11-18: damage in the start '*' alone is now read through by the best-fit
+       decode, because the letter itself is still whole.) */
     make_widths(2, 25000u, 30, 0, widths);
-    widths[3] = widths[4] = 75000u;
+    widths[11] = widths[13] = 75000u;
     edges_from_widths(widths, 1000000u, edges);
     s3_bc_init(&bc);
     r = run(&bc, edges, 30, 3000000u);
@@ -456,6 +484,122 @@ int s3_st_bc_cooldown(void)
     s3_bc_init(&bc);
     r = run(&bc, two, 60, 2000000u);
     if (r.cmds != 1) ok = 0;
+    return ok;
+}
+
+
+/* ---------------------------------------------------------------------------------
+ * S3-U13 (2026-11-18): a BLURRED analog barcode signal, like our tilted sensor gives.
+ * Narrow 6 mm, wide 15 mm, sensor spot 9 mm wide (Gaussian, at half height), 50 % contrast,
+ * +-8 noise, a sample every 0.4 mm (80 mm/s, 5 ms). s3_bcadc_step turns it into edges,
+ * the barcode state machine decodes. All 26 letters, both directions: at least 50 of 52
+ * right and NO wrong letter. (The old fixed-swing follower read none of these.)
+ * --------------------------------------------------------------------------------- */
+#define AN_RES      2                       /* model resolution: 2 per mm */
+#define AN_LEN      (520 * AN_RES)
+#define AN_HALF     23                      /* Gaussian spot, 9 mm wide at half height (taps every 0.5 mm) */
+static const uint16_t an_kern[AN_HALF + 1] = { 1000, 991, 966, 926, 872, 807, 735, 657, 578, 500, 425, 355,
+                                               292, 235, 187, 146, 112, 84, 62, 46, 33, 23, 16, 11 };
+static uint8_t       an_refl[AN_LEN];
+static s3_bcadc_t    an_adc;
+static const s3_bcadc_cfg_t an_cfg = { S3_BC_ADC_SWING, S3_BC_ADC_SWING_MIN, S3_BC_ADC_SWING_PCT,
+                                       S3_BC_ADC_MIN_BLACK, S3_BC_ADC_ACTIVE, S3_BC_ADC_SETTLE, S3_BC_ADC_NOISE_K };
+
+static int an_read(const char *mid, int backwards)
+{
+    int el[S3_BC_ELEMENTS], k = 0, got = 0;
+    const char *p3[3] = { PAT[0], mid, PAT[0] };
+    for (int c = 0; c < 3; c++) {
+        for (int j = 0; j < 9; j++) el[k++] = (p3[c][j] == '1') ? 15 * AN_RES : 6 * AN_RES;
+        if (c < 2) el[k++] = 6 * AN_RES;
+    }
+    if (backwards) for (int i = 0; i < 14; i++) { int t = el[i]; el[i] = el[28 - i]; el[28 - i] = t; }
+    for (int i = 0; i < AN_LEN; i++) an_refl[i] = 0;
+    { int x = 60 * AN_RES; for (int i = 0; i < S3_BC_ELEMENTS; i++) { if ((i % 2) == 0) for (int j = x; j < x + el[i]; j++) an_refl[j] = 1; x += el[i]; } }
+
+    s3_bcadc_init(&an_adc);
+    s3_bc_init(&bc);
+    bc.use_enc = true;
+    s3_bc_ev_t ev;
+    uint32_t t = 1000;
+    for (int x4 = 0; x4 < (AN_LEN / AN_RES - 20) * 10; x4 += 4) {       /* x4 = position in 0.1 mm */
+        int c = (x4 * AN_RES) / 10, acc = 0, ws = 0;
+        for (int j = -AN_HALF; j <= AN_HALF; j++) {
+            int w = an_kern[(j < 0) ? -j : j];
+            int q = c + j;
+            if ((q >= 0) && (q < AN_LEN)) acc += w * an_refl[q];   /* max 47 x 1000: fits int */
+            ws += w;
+        }
+        int v = 20 + (500 * acc) / ws + rnd(-8, 8);
+        int32_t enc = (int32_t)((x4 * 12077) / 10000);                 /* 12.08 counts/mm */
+        s3_edge_t e;
+        if (s3_bcadc_step(&an_adc, &an_cfg, (int16_t)v, t, enc, &e)) {
+            s3_bc_edge(&bc, e.t_us, e.enc, e.level, &ev);
+            if (ev.type == S3_BC_EV_CMD) got = ev.value; else if ((ev.type == S3_BC_EV_ERROR) && !got) got = -1;
+        }
+        t += 5000;
+        bc.now_enc = enc; bc.have_now_enc = true;
+        s3_bc_poll(&bc, t, &ev);
+        if (ev.type == S3_BC_EV_CMD) got = ev.value; else if ((ev.type == S3_BC_EV_ERROR) && !got) got = -1;
+    }
+    return got;
+}
+
+int s3_st_bc_analog(void)
+{
+    int right = 0, wrong = 0;
+    for (int i = 0; i < N_ALL39; i++) {
+        char ch = ALL39[i].ch;
+        if ((ch < 'A') || (ch > 'Z')) continue;
+        for (int b = 0; b < 2; b++) {
+            int r = an_read(ALL39[i].p, b);
+            if (r == ch) right++; else if (r > 0) wrong++;
+
+        }
+    }
+#ifdef S3_HOST_TEST
+    printf("         analog blurred barcode: %d/52 right, %d wrong\n", right, wrong);
+#endif
+    return (right >= 50) && (wrong == 0);
+}
+
+/* ---------------------------------------------------------------------------------
+ * S3-U14 (2026-11-18): junction from the LEFT sensor (it is ~3 cm behind the pair, so
+ * "all 3 black at once" never happens). A 20 mm cross line -> ONE junction, reported
+ * ~45 mm past its middle; a barcode, the track line (60 mm black), a mark while the pair
+ * is off the line, or while not going straight -> no junction.
+ * --------------------------------------------------------------------------------- */
+static int jx_run(const int *mm, int n, bool pair, bool straight, int16_t *past_out)
+{
+    /* mm[] = lengths of alternating white / black stretches under the left sensor, starting white */
+    s3_jx_t j; s3_jx_init(&j);
+    int hits = 0, pos01 = 0;                    /* position in 0.1 mm, 4 mm per sample (80 mm/s) */
+    for (int k = 0; k < n; k++) {
+        int end = pos01 + mm[k] * 10;
+        for (; pos01 < end; pos01 += 4) {
+            int16_t v = (k % 2) ? 1000 : 0;
+            int16_t past = 0;
+            int32_t enc = (int32_t)((pos01 * 12077) / 10000);
+            if (s3_jx_step(&j, v, pair, straight, enc, &past)) { hits++; *past_out = past; }
+        }
+    }
+    return hits;
+}
+
+int s3_st_junction_left(void)
+{
+    int ok = 1; int16_t past = -1;
+    static const int cross[]   = { 100, 20, 150 };
+    static const int barcode[] = { 100, 6, 15, 6, 6, 15, 6, 15, 6, 6, 6, 6, 6, 15, 6, 15, 15, 6, 6, 6, 6, 6, 15, 6, 6, 15, 6, 15, 6, 6, 150 };
+    static const int line[]    = { 100, 60, 150 };
+    static const int two[]     = { 100, 20, 20, 20, 150 };          /* two marks 20 mm apart: not lone */
+    if (jx_run(cross, 3, true, true, &past) != 1) ok = 0;
+    if ((past < S3_JX_QUIET_AFTER_MM) || (past > S3_JX_QUIET_AFTER_MM + 20)) ok = 0;
+    if (jx_run(barcode, 31, true, true, &past) != 0) ok = 0;
+    if (jx_run(line, 3, true, true, &past) != 0) ok = 0;
+    if (jx_run(two, 5, true, true, &past) != 0) ok = 0;
+    if (jx_run(cross, 3, false, true, &past) != 0) ok = 0;          /* pair not on the line */
+    if (jx_run(cross, 3, true, false, &past) != 0) ok = 0;          /* on a bend */
     return ok;
 }
 

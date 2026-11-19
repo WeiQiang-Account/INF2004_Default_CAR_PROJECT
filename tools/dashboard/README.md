@@ -24,3 +24,17 @@ A web page can only use MQTT over WebSockets. Add a second listener to
    The page remembers them.
 
 MQTT Explorer still works at the same time (port 1883).
+
+## Barcodes (2026-11-18)
+
+Everything is on `dashboard.html`:
+
+- **Barcodes and junctions** card: the letter just read (big tile), what it will do at
+  the next junction, the mapping (send it before START), read counts and the picture of
+  the last failed read.
+- **Barcode scan test** card (link at the top): with the robot READY, it drives itself
+  straight over a barcode (distance = barcode length + 10 cm, speed 50 mm/s) and the
+  wave shows what the left sensor saw. "Live sensor" streams the wave without moving.
+
+`barcode_test.html` is the older stand-alone version of the scan test (same commands).
+It is no longer needed.

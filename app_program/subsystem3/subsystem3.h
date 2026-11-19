@@ -10,7 +10,7 @@
  *	  IF-11  S3, S5 -> S2  GP7 edge branch via gpio_irq_register()  (drv_gpio_irq.h)
  *	  S3 -> VC         events          vc_post(VC_EV_MAKE(type, arg))  (vc_events.h, queue owned by S5)
  *	                     VC_EV_BARCODE  arg = valid<<7 | character read (A-Z ...; mapped by the VC)
- *	                     VC_EV_JUNCTION arg = line position + 100 (0..200)
+ *	                     VC_EV_JUNCTION arg = mm the left sensor is already past the cross line (2026-11-18)
  *	                     VC_EV_LINE_LOST / VC_EV_LINE_FOUND
  *	  S3 -> VC         hook            int s5_hook_line_detected(void)  (overrides S5's weak default)
  *	  S3 -> S1         read-only       s3_ir_raw(), s3_last_barcode_cmd(), ... (telemetry)
@@ -47,9 +47,12 @@ INT	s3_barcode_fail_reason(void);
 INT	s3_barcode_fail_widths(UB *out, INT max, UB *mm10);	/* last failed read widths: 0.1 mm (*mm10=1) or ms; returns count */	/* last failed read: 1 count 2 ratio 3 no match 4 format 10 missed edge 11 too many 12 timeout */
 UW	s3_junction_count(void);	/* cross-junctions seen (all 3 sensors black) */
 BOOL	s3_adc_edge_pop(s3_edge_t *e);	/* barcode edges made from the analog value (S3_BC_FROM_ADC) */
-UW	s3_bar_edges(void);		/* GP7 edges so far (barcode sensor works?)   */
+UW	s3_bar_edges(void);
+INT	s3_bcraw_get3(UW *from, UB *l, UB *c, UB *r, INT max);	/* left/centre/right samples (recorded run) */
+INT	s3_bcraw_get(UW *from, UB *out, INT max);	/* barcode-sensor samples since *from (5 ms each): 0..100 dark %, +128 = bar */		/* GP7 edges so far (barcode sensor works?)   */
 UW	s3_barcode_errors(void);	/* failed barcode reads                      */
 UW	s3_barcode_count(void);		/* good barcode reads (increments per read)  */
+UW	s3_barcode_partial(void);		/* good reads that used the start * + letter only */
 BOOL	s3_barcode_busy(void);		/* a barcode is being read                   */
 
 /* ---- Template example (consumer). See S3_KEEP_TEMPLATE_EXAMPLE in s3_config.h ---- */

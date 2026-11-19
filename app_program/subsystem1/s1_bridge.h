@@ -17,5 +17,10 @@ uint16_t s1_cmd_submit(const char *p, uint16_t len, char *reply, uint16_t size);
 uint32_t s1_now_ms(void);
 void     s1_wifi_fault(bool lost);	/* FAULT_BIT_WIFI in flg_fault (telemetry only) */
 void     s1_log(const char *msg);	/* console line, prefixed "[S1] " */
+/* barcode test page: stream on? and the barcode-sensor samples since *from (5 ms each) */
+bool     s1_bcraw_on(void);
+bool     s1_bcraw_all3(void);         /* recorded run: left + centre + right */
+uint16_t s1_bcraw_get3(uint32_t *from, uint8_t *l, uint8_t *c, uint8_t *r, uint16_t max);
+uint16_t s1_bcraw_get(uint32_t *from, uint8_t *out, uint16_t max);
 
 #endif /* S1_BRIDGE_H */

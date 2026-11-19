@@ -41,31 +41,82 @@ BOOL s3_adc_edge_pop(s3_edge_t *e)
 	bc_tail = t + 1u;
 	return TRUE;
 }
-LOCAL int16_t		bc_ext;				/* peak while over a bar, low while over white */
+/* raw barcode-sensor samples for the dashboard's barcode test page: one byte per 5 ms,
+   0..100 = darkness %, +128 = the reader counts it as a BAR. Written only here. */
+#define RAW_RING 512u
+LOCAL UB		raw_ring[RAW_RING];
+LOCAL UB		raw_c[RAW_RING], raw_r[RAW_RING];	/* 2026-11-18: centre / right too, for a recorded run */
+LOCAL volatile UW	raw_total;
+/* all three sensors: l = as above; c = centre 0..100, +128 = junction reported this sample;
+   r = right 0..100, +128 = the old "all 3 black" rule would have fired */
+INT s3_bcraw_get3(UW *from, UB *l, UB *c, UB *r, INT max)
+{
+	UW tot = raw_total, f = *from;
+	INT n = 0;
+	if ((tot - f) > RAW_RING) f = tot - RAW_RING;
+	while ((f != tot) && (n < max)) {
+		UW k = f & (RAW_RING - 1u);
+		l[n] = raw_ring[k]; c[n] = raw_c[k]; r[n] = raw_r[k]; n++; f++;
+	}
+	*from = f;
+	return n;
+}
+INT s3_bcraw_get(UW *from, UB *out, INT max)
+{
+	UW tot = raw_total, f = *from;
+	INT n = 0;
+	if ((tot - f) > RAW_RING) f = tot - RAW_RING;		/* reader fell behind: skip ahead */
+	while ((f != tot) && (n < max)) { out[n++] = raw_ring[f & (RAW_RING - 1u)]; f++; }
+	*from = f;
+	return n;
+}
+LOCAL s3_bcadc_t		bc_adc;			/* analog -> edges (s3_barcode.c), 2026-11-18 */
+LOCAL const s3_bcadc_cfg_t	bc_adc_cfg = { S3_BC_ADC_SWING, S3_BC_ADC_SWING_MIN, S3_BC_ADC_SWING_PCT,
+					       S3_BC_ADC_MIN_BLACK, S3_BC_ADC_ACTIVE, S3_BC_ADC_SETTLE, S3_BC_ADC_NOISE_K };
+/* push one item to the Barcode task (an edge, or S3_BC_LEVEL_ABORT) */
+LOCAL void bc_push(const s3_edge_t *e)
+{
+	UW h = bc_head;
+	if ((UW)(h - bc_tail) < BC_RING) {
+		bc_ring[h & (BC_RING - 1u)] = *e;
+		S3_MB();
+		bc_head = h + 1u;
+		(void)tk_set_flg(flg_bar_edge, FLG_S3_EDGE);
+	}
+}
+/* 2026-11-18: the TRACK line is under the barcode sensor (left black, centre white: the robot
+   has drifted). That is not a barcode: drop any read in progress quietly and start fresh,
+   so line brushes on bends do not pile up into fake "barcodes" that keep the reader busy. */
+LOCAL UB bc_on_line;
+LOCAL void bc_line_check(int16_t left, int16_t centre)
+{
+	UB on = ((left > S3_BLACK_THRESHOLD) && (centre < S3_SIDE_SEEN)) ? 1u : 0u;
+	if (on && !bc_on_line) {
+		s3_edge_t e;
+		e.t_us = ir_time_us(); e.enc = 0; e.level = S3_BC_LEVEL_ABORT;
+		s3_bcadc_init(&bc_adc);
+		bc_lvl = 0;
+		bc_push(&e);
+	}
+	bc_on_line = on;
+}
+LOCAL s3_jx_t		jx;			/* junction from the left sensor (S3_JUNC_FROM_LEFT) */
+LOCAL INT		junc_past;		/* mm the left sensor was past the cross line (0 = old rule) */
+LOCAL UW		jx_tick, jx_straight_at = 0x80000000u;
+LOCAL UB		old3;			/* the old "all 3 black" rule fired (recorded run only) */
 LOCAL void bc_adc_step(int16_t v)
 {
-	/* peak/valley follower: catches thin bars and thin gaps that never reach a fixed threshold */
-	UB lv = bc_lvl;
-	if (bc_lvl == 0u) {
-		if (v < bc_ext) bc_ext = v;				/* follow the white low */
-		if ((v > bc_ext + S3_BC_ADC_SWING) && (v > S3_BC_ADC_MIN_BLACK)) { lv = 1u; bc_ext = v; }
-	} else {
-		if (v > bc_ext) bc_ext = v;				/* follow the bar peak */
-		if (v < bc_ext - S3_BC_ADC_SWING) { lv = 0u; bc_ext = v; }
-	}
-	if (lv != bc_lvl) {
-		UW h = bc_head;
-		bc_lvl = lv;
+	/* adaptive peak/valley follower; each edge is placed halfway between its peak and low,
+	   with the time and encoder count of that spot (see s3_logic.h) */
+	s3_edge_t e;
+	int32_t l, r;
+	encoder_read(&l, &r);
+	if (bc_on_line) { bc_lvl = 0; return; }		/* the track line, not a barcode */
+	if (s3_bcadc_step(&bc_adc, &bc_adc_cfg, v, ir_time_us(), (l + r) / 2, &e)) {
 		bc_edges++;
-		if ((UW)(h - bc_tail) < BC_RING) {
-			bc_ring[h & (BC_RING - 1u)].t_us  = ir_time_us();
-			{ int32_t l, r; encoder_read(&l, &r); bc_ring[h & (BC_RING - 1u)].enc = (l + r) / 2; }	/* distance widths */
-			bc_ring[h & (BC_RING - 1u)].level = (uint8_t)(lv ? S3_BAR_LEVEL_BLACK : !S3_BAR_LEVEL_BLACK);
-			S3_MB();
-			bc_head = h + 1u;
-			(void)tk_set_flg(flg_bar_edge, FLG_S3_EDGE);
-		}
+		bc_push(&e);
 	}
+	bc_lvl = bc_adc.lvl;
 }
 UW   s3_bar_edges(void)      { return S3_BC_FROM_ADC ? bc_edges : ir_edge_count(); }
 
@@ -155,6 +206,8 @@ EXPORT void line_follow_task(INT stacd, void *exinf)
 #if S3_TIMING_PIN >= 0
 	(void)gpio_set_pin(S3_TIMING_PIN, GPIO_MODE_OUT);
 #endif
+	s3_bcadc_init(&bc_adc);
+	s3_jx_init(&jx);
 	calibrate();
 	ready_flag = 1;
 	next = now_ms();
@@ -167,19 +220,55 @@ EXPORT void line_follow_task(INT stacd, void *exinf)
 		if (ir_adc_read3(raw)) {
 			INT i;
 			for (i = 0; i < 3; i++) raw_now[i] = raw[i];
+			{
+				int16_t bv = s3_line_norm(&line, S3_BC_SENSOR_IDX, raw[S3_BC_SENSOR_IDX]);
 #if S3_BC_FROM_ADC
-			bc_adc_step(s3_line_norm(&line, S3_BC_SENSOR_IDX, raw[S3_BC_SENSOR_IDX]));
+				bc_line_check(bv, s3_line_norm(&line, 1, raw[1]));	/* raw[1] = centre */
+				bc_adc_step(bv);
 #endif
+				raw_ring[raw_total & (RAW_RING - 1u)] = (UB)((bv / 10) | (bc_lvl ? 0x80 : 0));
+			}
+			{
+			/* "going straight" in the last 0.5 s: the pair itself crosses the cross line ~3 cm
+			   before the left sensor does, and that briefly looks like a bend */
+			jx_tick++;
+			if (line.straight_count >= S3_JUNC_STRAIGHT_SAMPLES) jx_straight_at = jx_tick;
+			BOOL straight = ((UW)(jx_tick - jx_straight_at) < 100u);
+			old3 = 0u;
 			s3_line_step(&line, raw, s3_barcode_busy(), &out);
+#if S3_JUNC_FROM_LEFT
+			old3 = ((out.events & S3_LINE_EVT_JUNCTION) != 0u) ? 1u : 0u;	/* kept for the recorded run only */
+			out.events &= (uint8_t)~S3_LINE_EVT_JUNCTION;		/* the old "all 3 black" rule cannot work here */
+			{
+				int16_t past = 0;
+				int32_t l, r;
+				encoder_read(&l, &r);
+				if (s3_jx_step(&jx, s3_line_norm(&line, S3_BC_SENSOR_IDX, raw[S3_BC_SENSOR_IDX]),
+					       (out.norm[1] > S3_BLACK_THRESHOLD) || (out.norm[2] > S3_BLACK_THRESHOLD),
+					       straight && !out.lost, (l + r) / 2, &past)) {
+					out.events |= S3_LINE_EVT_JUNCTION;
+					junc_past = (past > 255) ? 255 : ((past < 0) ? 0 : past);
+				}
+			}
+#endif
+			}
 			pos_now        = out.pos;
 			lost_flag      = out.lost ? 1 : 0;
 			any_black_flag = out.any_black ? 1 : 0;
 
 			steer_publish((int8_t)out.steer);		/* IF-09: one 16-bit store, seq + correction */
 
+			{	/* recorded run: centre / right, then publish this sample (raw_total moved last) */
+				UW k = raw_total & (RAW_RING - 1u);
+				int16_t cn = out.norm[1], rn = out.norm[2];
+				raw_c[k] = (UB)(((cn < 0 ? 0 : cn) / 10) | (((out.events & S3_LINE_EVT_JUNCTION) != 0u) ? 0x80 : 0));
+				raw_r[k] = (UB)(((rn < 0 ? 0 : rn) / 10) | (old3 ? 0x80 : 0));
+				S3_MB();
+				raw_total++;
+			}
 			if ((out.events & S3_LINE_EVT_JUNCTION) != 0u) {
 				junc_count++;
-				(void)vc_post(VC_EV_MAKE(VC_EV_JUNCTION, (uint32_t)(out.pos + 100)));
+				(void)vc_post(VC_EV_MAKE(VC_EV_JUNCTION, (uint32_t)junc_past));	/* mm past the crossing */
 #if S3_VERBOSE
 				S3_PRINT("[S3] junction, line pos %d\n", (INT)out.pos);
 #endif

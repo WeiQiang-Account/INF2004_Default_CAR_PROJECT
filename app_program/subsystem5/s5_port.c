@@ -15,6 +15,10 @@ void s5_motion_move(int mm)
 {
 	(void)motion_move((mm < 0) ? -mm : mm, S5_BYPASS_SPEED_MM_S, (mm < 0));
 }
+void s5_motion_move_v(int mm, int v)
+{
+	(void)motion_move((mm < 0) ? -mm : mm, v, (mm < 0));
+}
 void s5_motion_turn(int deg)
 {
 	if (deg >= 0) (void)motion_turn_left(deg);
